@@ -135,14 +135,13 @@ flowchart LR
     cRetriever -->|"creates retrieval query vectors"| cEmbed
     cRetriever -->|"resolves hit metadata"| cTrialStore
     cJudge -->|"returns verified criterion evidence"| cPipeline
-    cJudge -->|"applies age and sex rules"| cSchemas
+    cJudge -->|"creates criterion result models"| cSchemas
     cTrialStore -->|"caches trial records"| cTrialData
     cTrialStore -->|"caches chunk passages"| cChunkData
     cTrialStore -.->|"reads remotely when configured"| cGCS
     cPipeline -->|"returns profile and ranked matches"| cFastAPI
     cFastAPI -->|"returns response JSON"| cApi
     cFetch -->|"provides normalized trial records"| cEnrich
-    cEnrich -->|"optional publication data"| cChunker
     cTrialData -->|"processed trial records"| cChunker
     cChunker -->|"trial text chunks"| cIndex
     cIndex -->|"embeds chunk documents"| cEmbed
