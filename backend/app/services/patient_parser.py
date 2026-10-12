@@ -4,7 +4,13 @@ from google.genai import types
 from app.config import settings
 from app.schemas import PatientProfile
 
-_client = genai.Client(vertexai=True, project=settings.gcp_project, location=settings.gcp_location)
+_client = None
+
+def get_parser_client():
+    global _client
+    if _client is None:
+        _client = genai.Client(vertexai=True, project=settings.gcp_project, location=settings.gcp_location)
+    return _client
 
 SYSTEM = """You extract a structured profile from an anonymised patient case.
 RULES:
@@ -15,7 +21,7 @@ RULES:
 
 
 def parse_patient(case: str) -> PatientProfile:
-    resp = _client.models.generate_content(
+    resp = get_parser_client().models.generate_content(
         model=settings.gemini_model,
         contents=f"PATIENT CASE:\n{case}",
         config=types.GenerateContentConfig(

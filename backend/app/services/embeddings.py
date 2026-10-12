@@ -5,13 +5,20 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import settings
 
-_client = genai.Client(vertexai=True, project=settings.gcp_project, location=settings.gcp_location)
+_client = None
 BATCH = 10
+
+
+def get_genai_client():
+    global _client
+    if _client is None:
+        _client = genai.Client(vertexai=True, project=settings.gcp_project, location=settings.gcp_location)
+    return _client
 
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(min=2, max=30))
 def _embed_batch(texts: list[str], task_type: str):
-    return _client.models.embed_content(
+    return get_genai_client().models.embed_content(
         model=settings.embedding_model,
         contents=texts,
         config=types.EmbedContentConfig(

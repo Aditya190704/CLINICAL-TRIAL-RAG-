@@ -10,11 +10,18 @@ from app.schemas import CriterionResult, JudgeOutput, PatientProfile
 # Gemini Client
 # ---------------------------------------------------------------------------
 
-_client = genai.Client(
-    vertexai=True,
-    project=settings.gcp_project,
-    location=settings.gcp_location,
-)
+_client = None
+
+
+def get_judge_client():
+    global _client
+    if _client is None:
+        _client = genai.Client(
+            vertexai=True,
+            project=settings.gcp_project,
+            location=settings.gcp_location,
+        )
+    return _client
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +265,10 @@ def _norm(s: str) -> str:
     """
     return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
 
-
+def _quote_in(text_norm: str, quote: str) -> bool:
+    """A quote may contain '...'. Each piece must appear verbatim in the source."""
+    parts = [p for p in re.split(r"\.{3}|…", quote) if len(_norm(p)) >= 12]
+    return bool(parts) and all(_norm(p) in text_norm for p in parts)
 # ---------------------------------------------------------------------------
 # Deterministic Age / Sex Checks
 # ---------------------------------------------------------------------------
@@ -401,7 +411,7 @@ def judge(
 
     try:
 
-        resp = _client.models.generate_content(
+        resp = get_judge_client().models.generate_content(
             model=settings.gemini_model,
             contents=prompt,
             config=types.GenerateContentConfig(
