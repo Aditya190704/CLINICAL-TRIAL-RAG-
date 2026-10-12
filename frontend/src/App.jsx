@@ -10,8 +10,10 @@ const STEPS = [
   "Reading the patient case",
   "Searching recruiting trials",
   "Checking eligibility criteria",
-  "Verifying every quote against its source",
+  "Verifying every quote",
 ];
+
+const VLABEL = { ELIGIBLE: "Likely eligible", POSSIBLY_ELIGIBLE: "Possibly eligible", EXCLUDED: "Excluded" };
 
 export default function App() {
   const [text, setText] = useState("");
@@ -19,6 +21,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [step, setStep] = useState(0);
+  const [active, setActive] = useState(0);
 
   useEffect(() => {
     if (!loading) return;
@@ -28,31 +31,32 @@ export default function App() {
   }, [loading]);
 
   async function submit() {
-    setLoading(true); setError(""); setData(null);
+    setLoading(true); setError(""); setData(null); setActive(0);
     try { setData(await matchPatient(text)); }
     catch (e) { setError(e.message); }
     finally { setLoading(false); }
   }
 
-  const count = (v) => (data ? data.matches.filter((m) => m.verdict === v).length : 0);
-
   return (
     <div className="app" style={{ "--bg-image": `url("${BG_IMAGE_URL}")` }}>
-      <header className="hero">
-        <div className="hero-badge">Clinical decision support</div>
-        <h1>Clinical Trial Matcher</h1>
-        <p>Paste an anonymised patient case. Get the 3 best open trials, with proof for every decision.</p>
-        <div className="how">
+      <header className="top">
+        <div className="brand">
+          <div className="logo">+</div>
+          <div>
+            <h1>Clinical Trial Matcher</h1>
+            <p>Find open trials for a patient, with proof for every decision</p>
+          </div>
+        </div>
+        <div className="steps-pills">
           <span><b>1</b> Paste case</span>
-          <i>→</i>
-          <span><b>2</b> AI finds and checks trials</span>
-          <i>→</i>
-          <span><b>3</b> Verified quotes as evidence</span>
+          <span><b>2</b> AI checks trials</span>
+          <span><b>3</b> Verified evidence</span>
         </div>
       </header>
 
       <main className="layout">
-        <section className="glass input">
+        {/* ---------------- Left: input ---------------- */}
+        <section className="panel">
           <div className="panel-head">
             <h2>Patient case</h2>
             <button className="link" onClick={() => setText(SAMPLE)}>Load sample</button>
@@ -62,7 +66,7 @@ export default function App() {
             onChange={(e) => setText(e.target.value)}
             placeholder="Anonymised case only: age, sex, diagnosis, stage, biomarkers, prior treatment, comorbidities, labs..."
           />
-          <div className="counter">{text.length} characters (minimum 40)</div>
+          <div className="counter">{text.length} characters · minimum 40</div>
           <button className="primary" disabled={loading || text.trim().length < 40} onClick={submit}>
             {loading ? "Analysing..." : "Find matching trials"}
           </button>
@@ -70,11 +74,12 @@ export default function App() {
           {data && <ProfilePanel profile={data.patient_profile} />}
         </section>
 
-        <section className="results">
+        {/* ---------------- Right: results ---------------- */}
+        <section className="stage">
           {loading && (
-            <div className="glass-dark progress">
+            <div className="center">
               <h3>Working on it</h3>
-              <ul>
+              <ul className="progress">
                 {STEPS.map((s, i) => (
                   <li key={s} className={i < step ? "done" : i === step ? "active" : ""}>
                     <span className="dot">{i < step ? "✓" : i + 1}</span>{s}
@@ -86,10 +91,10 @@ export default function App() {
           )}
 
           {!loading && !data && (
-            <div className="glass-dark empty">
+            <div className="center">
               <div className="empty-icon">🧬</div>
               <h3>Your matches will appear here</h3>
-              <p>Every decision shows the exact trial rule and the exact patient evidence, so you can verify it in seconds.</p>
+              <p>Paste an anonymised case on the left. Each decision will show the exact trial rule and the exact patient evidence.</p>
               <div className="legend">
                 <span className="tag t-SUPPORTS">✓ Met</span>
                 <span className="tag t-BLOCKS">✕ Blocks</span>
@@ -100,15 +105,19 @@ export default function App() {
 
           {data && (
             <>
-              <div className="summary-bar glass-dark">
-                <div><b>{data.matches.length}</b><span>trials shown</span></div>
-                <div className="s-green"><b>{count("ELIGIBLE")}</b><span>likely eligible</span></div>
-                <div className="s-amber"><b>{count("POSSIBLY_ELIGIBLE")}</b><span>possibly eligible</span></div>
-                <div className="s-red"><b>{count("EXCLUDED")}</b><span>excluded</span></div>
-                <div><b>{data.latency_seconds}s</b><span>time taken</span></div>
+              <div className="tabs">
+                {data.matches.map((m, i) => (
+                  <button key={m.nct_id} className={`tab vt-${m.verdict} ${i === active ? "on" : ""}`} onClick={() => setActive(i)}>
+                    <div className="tab-top">
+                      <span className="tab-rank">#{m.rank}</span>
+                      <span className={`pill pill-${m.verdict}`}>{VLABEL[m.verdict]}</span>
+                    </div>
+                    <div className="tab-title">{m.title}</div>
+                  </button>
+                ))}
               </div>
-              {data.matches.map((m) => <TrialCard key={m.nct_id} match={m} />)}
-              <p className="disclaimer">{data.disclaimer}</p>
+              <TrialCard key={data.matches[active].nct_id} match={data.matches[active]} />
+              <div className="disclaimer">{data.disclaimer} · {data.latency_seconds}s</div>
             </>
           )}
         </section>

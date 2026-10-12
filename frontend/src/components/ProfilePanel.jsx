@@ -9,11 +9,11 @@ const Row = ({ label, items }) =>
 export default function ProfilePanel({ profile }) {
   return (
     <div className="profile">
-      <h3>Extracted profile</h3>
+      <h3>What the AI extracted</h3>
       <div className="prow">
-        <span>Demographics</span>
+        <span>Patient</span>
         <div>
-          <em className="chip">{profile.age_years ?? "age unknown"}</em>
+          <em className="chip">{profile.age_years != null ? `${profile.age_years} yrs` : "age unknown"}</em>
           <em className="chip">{profile.sex}</em>
         </div>
       </div>
