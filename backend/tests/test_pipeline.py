@@ -34,11 +34,13 @@ def test_pipeline_phi_rejection():
 # 2. Pipeline Integration & Verdict Ordering Tests
 # ---------------------------------------------------------------------------
 
-@patch("app.services.pipeline.parse_patient")
-@patch("app.services.pipeline.retrieve")
-@patch("app.services.pipeline.judge")
-@patch("app.services.pipeline.trials")
-@patch("app.services.pipeline.chunks")
+
+@patch("app.agents.workflow.parse_patient")
+@patch("app.agents.workflow.retrieve")
+@patch("app.agents.workflow.judge")
+@patch("app.agents.workflow.trials")
+@patch("app.agents.workflow.chunks")
+
 def test_pipeline_run_integration(mock_chunks, mock_trials, mock_judge, mock_retrieve, mock_parse):
     """Pipeline runs end-to-end with mocked components and preserves schemas."""
     mock_parse.return_value = PatientProfile(

@@ -61,6 +61,20 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("final_results", "FINAL_RESULTS", "top_k_results", "TOP_K_RESULTS"),
     )
 
+    # Google ADK Workflow Configuration
+    adk_concurrency: int = Field(
+        default=6,
+        validation_alias=AliasChoices("adk_concurrency", "ADK_CONCURRENCY"),
+    )
+    adk_timeout_seconds: float = Field(
+        default=60.0,
+        validation_alias=AliasChoices("adk_timeout_seconds", "ADK_TIMEOUT_SECONDS"),
+    )
+    adk_app_name: str = Field(
+        default="clinical_trial_matcher",
+        validation_alias=AliasChoices("adk_app_name", "ADK_APP_NAME"),
+    )
+
     raw_dir: Path = BASE_DIR / "data" / "raw"
     processed_dir: Path = BASE_DIR / "data" / "processed"
 
