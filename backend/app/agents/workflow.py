@@ -1,335 +1,412 @@
 
-# backend/app/agents/workflow.py
+"""ADK workflow for clinical-trial matching.
+
+Pipeline:
+1. Parse the patient case.
+2. Retrieve relevant trial candidates.
+3. Judge eligibility criteria for each candidate.
+4. Calculate deterministic verdicts and return the best results.
+
+The retrieval score measures relevance, not clinical eligibility.
+"""
+
+from __future__ import annotations
 
 import asyncio
-import time
-import uuid
-from typing import Any, AsyncGenerator
-
-from google.adk.agents import BaseAgent, SequentialAgent, ParallelAgent
-from google.adk.agents import InvocationContext
-from google.adk.events import Event, EventActions
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.genai import types
+import logging
+from typing import Any
 
 from app.config import settings
 from app.schemas import (
-    PatientProfile,
     CriterionResult,
-    Passage,
-    TrialMatch,
     MatchResponse,
+    PatientProfile,
+    TrialMatch,
 )
+from app.services.eligibility_judge import compute_verdict, judge
 from app.services.patient_parser import parse_patient
 from app.services.retriever import retrieve
-from app.services.eligibility_judge import judge, compute_verdict
-from app.services.trial_store import trials, chunks
+from app.services.trial_store import trials
 
+logger = logging.getLogger(__name__)
 
 DISCLAIMER = (
-    "Research decision-support only. Not medical advice. All eligibility "
-    "reasoning is limited to the supplied case and registry text; confirm "
-    "with the trial's contacts before referral."
+    "This tool provides research assistance, not a medical diagnosis or treatment "
+    "recommendation. Trial matches are preliminary. A qualified clinical team must "
+    "verify the official eligibility criteria and confirm eligibility."
 )
 
-VERDICT_ORDER = {
-    "ELIGIBLE": 0,
-    "POSSIBLY_ELIGIBLE": 1,
-    "EXCLUDED": 2,
-}
+
+def _text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, dict)):
+        return ""
+    return str(value).strip()
 
 
-def stage_event(ctx: InvocationContext, agent_name: str, state_delta=None):
-    """Build a standard ADK event, optionally updating session state."""
-    return Event(
-        invocation_id=ctx.invocation_id,
-        author=agent_name,
-        content=types.Content(
-            role="model",
-            parts=[types.Part(text=f"{agent_name} completed.")],
-        ),
-        actions=EventActions(state_delta=state_delta or {}),
+def _trial_id(trial: dict[str, Any]) -> str:
+    return _text(trial.get("nct_id")).upper()
+
+
+def _trial_title(trial: dict[str, Any]) -> str:
+    return (
+        _text(trial.get("brief_title"))
+        or _text(trial.get("title"))
+        or _text(trial.get("official_title"))
+        or _trial_id(trial)
     )
 
 
-class PatientParserAgent(BaseAgent):
-    async def _run_async_impl(
-        self, ctx: InvocationContext
-    ) -> AsyncGenerator[Event, None]:
-        case = ctx.session.state["patient_case"]
+def _trial_url(nct_id: str) -> str:
+    return f"https://clinicaltrials.gov/study/{nct_id}"
 
-        profile = await asyncio.to_thread(parse_patient, case)
 
-        # Keep ADK state JSON-serializable.
-        yield stage_event(
-            ctx,
-            self.name,
-            {"patient_profile": profile.model_dump(mode="json")},
+def _candidate_id(candidate: Any) -> str:
+    if isinstance(candidate, dict):
+        return _text(candidate.get("nct_id")).upper()
+    return _text(getattr(candidate, "nct_id", "")).upper()
+
+
+def _candidate_value(candidate: Any, key: str, default: Any = None) -> Any:
+    if isinstance(candidate, dict):
+        return candidate.get(key, default)
+    return getattr(candidate, key, default)
+
+
+def _candidate_score(candidate: Any) -> float:
+    """Return a safe relevance score in the range 0..1."""
+    value = _candidate_value(candidate, "best_sim", 0.0)
+
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if not 0.0 <= score <= 1.0:
+        return 0.0
+
+    return score
+
+
+def _candidate_chunk_ids(candidate: Any) -> list[str]:
+    value = _candidate_value(candidate, "chunk_ids", [])
+
+    if not isinstance(value, (list, tuple)):
+        return []
+
+    return [str(item) for item in value if item is not None]
+
+
+def _get_trial_index() -> dict[str, dict[str, Any]]:
+    """Index processed trial metadata by NCT ID."""
+    index: dict[str, dict[str, Any]] = {}
+
+    for trial in trials() or []:
+        if not isinstance(trial, dict):
+            continue
+
+        nct_id = _trial_id(trial)
+        if nct_id:
+            index[nct_id] = trial
+
+    return index
+
+
+def _get_passages(
+    candidate: Any,
+    nct_id: str,
+    max_passages: int = 3,
+) -> list[dict[str, str]]:
+    """Get supporting passages from the local processed chunk store."""
+    from app.services.trial_store import chunks
+
+    chunk_index: dict[str, dict[str, Any]] = {}
+
+    for chunk in chunks() or []:
+        if not isinstance(chunk, dict):
+            continue
+
+        chunk_id = _text(chunk.get("chunk_id"))
+        if chunk_id:
+            chunk_index[chunk_id] = chunk
+
+    passages: list[dict[str, str]] = []
+
+    for chunk_id in _candidate_chunk_ids(candidate):
+        chunk = chunk_index.get(chunk_id)
+        if not chunk:
+            continue
+
+        chunk_nct = _text(chunk.get("nct_id")).upper()
+
+        # Never attach another trial's text to this candidate.
+        if chunk_nct != nct_id:
+            continue
+
+        text = (
+            _text(chunk.get("chunk_text"))
+            or _text(chunk.get("text"))
+            or _text(chunk.get("content"))
         )
+        if not text:
+            continue
 
-
-class TrialRetrievalAgent(BaseAgent):
-    async def _run_async_impl(
-        self, ctx: InvocationContext
-    ) -> AsyncGenerator[Event, None]:
-        profile = PatientProfile.model_validate(
-            ctx.session.state["patient_profile"]
-        )
-        case = ctx.session.state["patient_case"]
-
-        candidates = await asyncio.to_thread(
-            retrieve, [profile.search_query, case[:2000]]
-        )
-
-        limit = max(0, settings.candidates_to_judge)
-        candidate_records = [
+        passages.append(
             {
-                "nct_id": candidate.nct_id,
-                "rrf": float(candidate.rrf),
-                "best_sim": float(candidate.best_sim),
-                "chunk_ids": list(candidate.chunk_ids),
+                "chunk_type": (
+                    _text(chunk.get("chunk_type"))
+                    or _text(chunk.get("section"))
+                    or "Trial information"
+                ),
+                "text": text[:700],
             }
-            for candidate in candidates[:limit]
-        ]
-
-        yield stage_event(
-            ctx,
-            self.name,
-            {"trial_candidates": candidate_records},
         )
 
+        if len(passages) >= max_passages:
+            break
 
-class TrialEligibilityAgent(BaseAgent):
-    """Evaluate one retrieved trial using the existing eligibility judge."""
+    return passages
 
-    nct_id: str
 
-    async def _run_async_impl(
-        self, ctx: InvocationContext
-    ) -> AsyncGenerator[Event, None]:
-        case = ctx.session.state["patient_case"]
-        profile = PatientProfile.model_validate(
-            ctx.session.state["patient_profile"]
-        )
+async def _judge_one(
+    case: str,
+    profile: PatientProfile,
+    trial: dict[str, Any],
+    semaphore: asyncio.Semaphore,
+) -> dict[str, Any]:
+    """Judge a single trial without blocking the event loop."""
+    async with semaphore:
+        nct_id = _trial_id(trial)
 
-        trial = trials().get(self.nct_id)
-        if trial is None:
-            raise RuntimeError(
-                f"Retrieved trial {self.nct_id} is missing from trial storage."
+        try:
+            criteria, summary, dropped_unverified = await asyncio.to_thread(
+                judge,
+                case,
+                profile,
+                trial,
             )
 
-        criteria, summary, dropped = await asyncio.to_thread(
-            judge, case, profile, trial
-        )
-
-        result = {
-            "criteria": [
-                item.model_dump(mode="json")
-                if hasattr(item, "model_dump")
-                else item
-                for item in criteria
-            ],
-            "summary": summary,
-            "dropped_unverified": dropped,
-        }
-
-        yield stage_event(
-            ctx,
-            self.name,
-            {f"trial_judgement:{self.nct_id}": result},
-        )
-
-
-class ParallelEligibilityAgent(BaseAgent):
-    """Run trial evaluations concurrently in bounded batches."""
-
-    async def _run_async_impl(
-        self, ctx: InvocationContext
-    ) -> AsyncGenerator[Event, None]:
-        candidates = ctx.session.state.get("trial_candidates", [])
-        batch_size = max(1, settings.adk_concurrency)
-
-        for start in range(0, len(candidates), batch_size):
-            batch = candidates[start : start + batch_size]
-
-            workers = [
-                TrialEligibilityAgent(
-                    name=f"trial_judge_{start + offset}",
-                    nct_id=item["nct_id"],
-                )
-                for offset, item in enumerate(batch)
-            ]
-
-            parallel = ParallelAgent(
-                name=f"parallel_trial_batch_{start // batch_size + 1}",
-                description="Evaluate independent clinical trial eligibility.",
-                sub_agents=workers,
-                timeout=settings.adk_timeout_seconds,
-            )
-
-            async for event in parallel.run_async(ctx):
-                yield event
-
-        yield stage_event(ctx, self.name)
-
-
-class FinalRankingAgent(BaseAgent):
-    async def _run_async_impl(
-        self, ctx: InvocationContext
-    ) -> AsyncGenerator[Event, None]:
-        state = ctx.session.state
-        profile = PatientProfile.model_validate(state["patient_profile"])
-        candidate_records = state.get("trial_candidates", [])
-        all_trials = trials()
-        all_chunks = chunks()
-
-        evaluated = []
-
-        for candidate in candidate_records:
-            nct_id = candidate["nct_id"]
-            raw = state.get(f"trial_judgement:{nct_id}")
-
-            # Never infer eligibility if evaluation did not produce a result.
-            if raw is None:
-                continue
-
-            criteria = [
-                CriterionResult.model_validate(item)
-                for item in raw["criteria"]
-            ]
             verdict = compute_verdict(criteria)
 
-            evaluated.append(
-                (candidate, all_trials[nct_id], criteria, raw, verdict)
+            return {
+                "nct_id": nct_id,
+                "criteria": criteria,
+                "summary": summary,
+                "dropped_unverified": dropped_unverified,
+                "verdict": verdict,
+                "error": None,
+            }
+
+        except Exception as exc:
+            logger.warning(
+                "Trial judging failed for %s (%s).",
+                nct_id or "unknown trial",
+                type(exc).__name__,
             )
 
-        evaluated.sort(
-            key=lambda item: (
-                VERDICT_ORDER.get(item[4], 1),
-                -item[0]["rrf"],
-            )
-        )
-
-        matches = []
-
-        for rank, (candidate, trial, criteria, raw, verdict) in enumerate(
-            evaluated[: settings.final_results], start=1
-        ):
-            passages = [
-                Passage(
-                    chunk_type=all_chunks[chunk_id]["type"],
-                    text=all_chunks[chunk_id]["text"][:700],
-                )
-                for chunk_id in candidate["chunk_ids"][:3]
-                if chunk_id in all_chunks
-            ]
-
-            matches.append(
-                TrialMatch(
-                    rank=rank,
-                    nct_id=trial["nct_id"],
-                    title=trial["title"],
-                    url=f"https://clinicaltrials.gov/study/{trial['nct_id']}",
-                    status=trial["status"],
-                    phases=trial.get("phases", []),
-                    conditions=trial.get("conditions", [])[:6],
-                    sponsor=trial.get("sponsor"),
-                    locations=trial.get("locations", [])[:3],
-                    relevance_score=round(candidate["best_sim"], 3),
-                    verdict=verdict,
-                    summary=raw["summary"],
-                    criteria=criteria,
-                    dropped_unverified=raw["dropped_unverified"],
-                    passages=passages,
-                )
+            # Fail closed: errors must not imply eligibility.
+            fallback_criterion = CriterionResult(
+                source="STRUCTURED",
+                criterion_type="INCLUSION",
+                criterion_quote="Eligibility assessment unavailable",
+                patient_evidence=None,
+                impact="UNKNOWN",
+                explanation=(
+                    "The automated assessment failed. Eligibility remains "
+                    "unverified and requires manual review."
+                ),
             )
 
-        response = MatchResponse(
+            return {
+                "nct_id": nct_id,
+                "criteria": [fallback_criterion],
+                "summary": (
+                    "The eligibility assessment failed; no positive eligibility "
+                    "conclusion can be established."
+                ),
+                "dropped_unverified": 0,
+                "verdict": "POSSIBLY_ELIGIBLE",
+                "error": type(exc).__name__,
+            }
+
+
+def _verdict_priority(verdict: str) -> int:
+    """Order potentially suitable trials ahead of excluded trials."""
+    return {
+        "ELIGIBLE": 0,
+        "POSSIBLY_ELIGIBLE": 1,
+        "EXCLUDED": 2,
+    }.get(verdict, 3)
+
+
+def _criterion_priority(criteria: list[CriterionResult]) -> tuple[int, int, int]:
+    """Provide a transparent, deterministic criterion summary for tie-breaking."""
+    supports = sum(item.impact == "SUPPORTS" for item in criteria)
+    unknowns = sum(item.impact == "UNKNOWN" for item in criteria)
+    blocks = sum(item.impact == "BLOCKS" for item in criteria)
+
+    # More supporting evidence first, then fewer unknowns and fewer conflicts.
+    return (-supports, unknowns, blocks)
+
+
+def _build_trial_match(
+    candidate: Any,
+    trial: dict[str, Any],
+    judgement: dict[str, Any],
+    rank: int,
+) -> TrialMatch:
+    nct_id = _trial_id(trial)
+    criteria = judgement["criteria"]
+
+    return TrialMatch(
+        rank=rank,
+        nct_id=nct_id,
+        title=_trial_title(trial),
+        url=_trial_url(nct_id),
+        status=_text(trial.get("overall_status") or trial.get("status"))
+        or "Unknown",
+        phases=trial.get("phases") or [],
+        conditions=(trial.get("conditions") or [])[:6],
+        sponsor=_text(trial.get("lead_sponsor") or trial.get("sponsor"))
+        or None,
+        locations=(trial.get("locations") or [])[:3],
+        relevance_score=round(_candidate_score(candidate), 3),
+        verdict=judgement["verdict"],
+        summary=judgement["summary"],
+        criteria=criteria,
+        dropped_unverified=int(judgement["dropped_unverified"]),
+        passages=_get_passages(candidate, nct_id),
+    )
+
+
+async def _run_workflow_async(case: str) -> MatchResponse:
+    """Execute the matching pipeline asynchronously."""
+    case = (case or "").strip()
+
+    if len(case) < 40:
+        raise ValueError("Patient case must contain at least 40 characters.")
+
+    if len(case) > 8000:
+        raise ValueError("Patient case must not exceed 8000 characters.")
+
+    # Stage 1: Parse the patient's explicitly stated facts.
+    profile = await asyncio.to_thread(parse_patient, case)
+
+    if not isinstance(profile, PatientProfile):
+        profile = PatientProfile.model_validate(profile)
+
+    # Stage 2: Retrieve relevant candidates.
+    raw_candidates = await asyncio.to_thread(
+        retrieve,
+        [profile.search_query, case[:2000]],
+    )
+
+    if not raw_candidates:
+        return MatchResponse(
             patient_profile=profile,
-            matches=matches,
+            matches=[],
             disclaimer=DISCLAIMER,
-            latency_seconds=round(
-                time.time() - state["workflow_started_at"], 1
+            latency_seconds=0.0,
+        )
+
+    trial_index = _get_trial_index()
+
+    # Deduplicate candidates and discard IDs not found in processed trial data.
+    candidates_by_id: dict[str, Any] = {}
+
+    for candidate in raw_candidates:
+        nct_id = _candidate_id(candidate)
+
+        if not nct_id or nct_id not in trial_index:
+            continue
+
+        previous = candidates_by_id.get(nct_id)
+        if previous is None or _candidate_score(candidate) > _candidate_score(previous):
+            candidates_by_id[nct_id] = candidate
+
+    candidates = sorted(
+        candidates_by_id.values(),
+        key=_candidate_score,
+        reverse=True,
+    )[: settings.candidates_to_judge]
+
+    if not candidates:
+        return MatchResponse(
+            patient_profile=profile,
+            matches=[],
+            disclaimer=DISCLAIMER,
+            latency_seconds=0.0,
+        )
+
+    # Stage 3: Judge candidates in parallel, with bounded concurrency.
+    concurrency = max(1, int(settings.adk_concurrency))
+    semaphore = asyncio.Semaphore(concurrency)
+
+    judgement_results = await asyncio.gather(
+        *[
+            _judge_one(
+                case=case,
+                profile=profile,
+                trial=trial_index[_candidate_id(candidate)],
+                semaphore=semaphore,
+            )
+            for candidate in candidates
+        ]
+    )
+
+    judgement_by_id = {
+        item["nct_id"]: item
+        for item in judgement_results
+    }
+
+    # Stage 4: Rank by deterministic eligibility verdict first.
+    # Retrieval similarity breaks ties within the same verdict category.
+    ranked_candidates = sorted(
+        candidates,
+        key=lambda candidate: (
+            _verdict_priority(
+                judgement_by_id[_candidate_id(candidate)]["verdict"]
             ),
-        )
-
-        yield stage_event(
-            ctx,
-            self.name,
-            {"match_response": response.model_dump(mode="json")},
-        )
-
-
-def build_workflow() -> SequentialAgent:
-    """Build the request-independent ADK workflow."""
-    return SequentialAgent(
-        name="clinical_trial_matching_workflow",
-        description=(
-            "Parse a patient case, retrieve clinical trials, evaluate "
-            "eligibility in parallel, and rank the results."
+            _criterion_priority(
+                judgement_by_id[_candidate_id(candidate)]["criteria"]
+            ),
+            -_candidate_score(candidate),
         ),
-        sub_agents=[
-            PatientParserAgent(name="patient_parser"),
-            TrialRetrievalAgent(name="trial_retriever"),
-            ParallelEligibilityAgent(name="eligibility_orchestrator"),
-            FinalRankingAgent(name="final_ranker"),
-        ],
-        timeout=settings.adk_timeout_seconds,
     )
 
+    final_matches: list[TrialMatch] = []
 
-async def _run_workflow_async(patient_case: str) -> MatchResponse:
-    app_name = settings.adk_app_name
-    user_id = "clinical-trial-api"
-    session_id = str(uuid.uuid4())
-
-    # Request-scoped session service prevents cases from sharing session state.
-    session_service = InMemorySessionService()
-    await session_service.create_session(
-        app_name=app_name,
-        user_id=user_id,
-        session_id=session_id,
-        state={
-            "patient_case": patient_case,
-            "workflow_started_at": time.time(),
-        },
-    )
-
-    runner = Runner(
-        app_name=app_name,
-        agent=build_workflow(),
-        session_service=session_service,
-    )
-
-    message = types.Content(
-        role="user",
-        parts=[types.Part(text="Run the clinical trial matching workflow.")],
-    )
-
-    async for _event in runner.run_async(
-        user_id=user_id,
-        session_id=session_id,
-        new_message=message,
+    for rank, candidate in enumerate(
+        ranked_candidates[: settings.final_results],
+        start=1,
     ):
-        pass
+        nct_id = _candidate_id(candidate)
+        final_matches.append(
+            _build_trial_match(
+                candidate=candidate,
+                trial=trial_index[nct_id],
+                judgement=judgement_by_id[nct_id],
+                rank=rank,
+            )
+        )
 
-    session = await session_service.get_session(
-        app_name=app_name,
-        user_id=user_id,
-        session_id=session_id,
+    return MatchResponse(
+        patient_profile=profile,
+        matches=final_matches,
+        disclaimer=DISCLAIMER,
+        latency_seconds=0.0,
     )
 
-    if session is None:
-        raise RuntimeError("ADK workflow session was not found.")
 
-    result = session.state.get("match_response")
-    if result is None:
-        raise RuntimeError("ADK workflow completed without a match response.")
-
-    return MatchResponse.model_validate(result)
-
-
-def run_adk_workflow(patient_case: str) -> MatchResponse:
-    """Synchronous entry point for the existing synchronous FastAPI route."""
-    return asyncio.run(_run_workflow_async(patient_case))
+def run_adk_workflow(case: str) -> MatchResponse:
+    """Compatibility entry point used by the existing API pipeline."""
+    try:
+        return asyncio.run(_run_workflow_async(case))
+    except RuntimeError as exc:
+        if "asyncio.run() cannot be called" in str(exc):
+            raise RuntimeError(
+                "run_adk_workflow() cannot be called inside an active event loop. "
+                "Use _run_workflow_async() from asynchronous code."
+            ) from exc
+        raise

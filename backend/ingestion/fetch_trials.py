@@ -11,7 +11,7 @@ API = "https://clinicaltrials.gov/api/v2/studies"
 AREAS = ["breast cancer", "lung cancer", "colorectal cancer", "type 2 diabetes", "heart failure",
          "chronic kidney disease", "rheumatoid arthritis", "multiple sclerosis", "asthma COPD",
          "Alzheimer disease", "depression", "hepatitis HIV infection"]
-PER_AREA = 42  # 12 x 42 = 504
+PER_AREA = 42  # 12 x 42
 
 
 def parse_age(s: str | None):
