@@ -4,7 +4,8 @@ Clinical Trial RAG is a patient-to-trial matching application that helps a clini
 
 - a FastAPI backend,
 - a React frontend,
-- Google Cloud BigQuery vector search,
+- Google Cloud BigQuery vector search
+,
 - Vertex AI Gemini models for parsing and eligibility checking,
 - and a workflow that ranks candidate trials using both similarity and evidence-based review.
 

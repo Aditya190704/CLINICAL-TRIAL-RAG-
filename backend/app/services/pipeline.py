@@ -30,6 +30,14 @@ PHI_PATTERNS = {
     ),
 }
 
+# Single regex pattern for backward-compatibility with tests/callers
+PHI = re.compile(
+    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b|\b\d{3}-\d{2}-\d{4}\b|(?<!\d)(?:\+?1[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)",
+    re.IGNORECASE,
+)
+
+ORDER = {"ELIGIBLE": 0, "POSSIBLY_ELIGIBLE": 1, "EXCLUDED": 2}
+
 
 def _validate_case(case: str) -> str:
     """Validate the case without logging its contents."""

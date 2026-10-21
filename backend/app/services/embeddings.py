@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import math
+import random
 import time
 from typing import Literal, Sequence
 
@@ -15,9 +16,11 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 10
-MAX_RETRIES = 3
-RETRY_DELAY_SECONDS = 1.0
+# Keep requests within a low per-minute quota.
+BATCH_SIZE = 20
+MAX_RETRIES = 6
+RETRY_DELAY_SECONDS = 5.0
+REQUEST_INTERVAL_SECONDS = 12.0
 
 TaskType = Literal["RETRIEVAL_DOCUMENT", "RETRIEVAL_QUERY"]
 
@@ -33,7 +36,10 @@ def _validate_task_type(task_type: str) -> TaskType:
     return task_type  # type: ignore[return-value]
 
 
-def _normalize_vector(values: Sequence[float], expected_dim: int) -> list[float]:
+def _normalize_vector(
+    values: Sequence[float],
+    expected_dim: int,
+) -> list[float]:
     """Validate an embedding vector and normalize it to unit length."""
     if len(values) != expected_dim:
         raise RuntimeError(
@@ -44,12 +50,16 @@ def _normalize_vector(values: Sequence[float], expected_dim: int) -> list[float]
     vector = [float(value) for value in values]
 
     if not all(math.isfinite(value) for value in vector):
-        raise RuntimeError("Embedding response contains non-finite values.")
+        raise RuntimeError(
+            "Embedding response contains non-finite values."
+        )
 
     norm = math.sqrt(sum(value * value for value in vector))
 
     if norm == 0:
-        raise RuntimeError("Embedding service returned a zero-magnitude vector.")
+        raise RuntimeError(
+            "Embedding service returned a zero-magnitude vector."
+        )
 
     return [value / norm for value in vector]
 
@@ -59,7 +69,7 @@ def _embed_batch(
     texts: list[str],
     task_type: TaskType,
 ) -> list[list[float]]:
-    """Embed one batch, retrying transient failures a limited number of times."""
+    """Embed a batch with exponential backoff for transient failures."""
     expected_dim = int(settings.embedding_dim)
     last_error: Exception | None = None
 
@@ -78,7 +88,8 @@ def _embed_batch(
 
             if not embeddings or len(embeddings) != len(texts):
                 raise RuntimeError(
-                    "Embedding service returned an unexpected number of vectors."
+                    "Embedding service returned an unexpected number "
+                    "of vectors."
                 )
 
             vectors: list[list[float]] = []
@@ -91,7 +102,9 @@ def _embed_batch(
                         "Embedding response is missing vector values."
                     )
 
-                vectors.append(_normalize_vector(values, expected_dim))
+                vectors.append(
+                    _normalize_vector(values, expected_dim)
+                )
 
             return vectors
 
@@ -101,14 +114,20 @@ def _embed_batch(
             if attempt == MAX_RETRIES - 1:
                 break
 
+            # Exponential backoff plus jitter.
+            delay = RETRY_DELAY_SECONDS * (2**attempt)
+            delay += random.uniform(0, 1)
+
             logger.warning(
-                "Embedding request failed (attempt %d/%d, error=%s).",
+                "Embedding request failed (attempt %d/%d, error=%s). "
+                "Retrying in %.1f seconds.",
                 attempt + 1,
                 MAX_RETRIES,
                 type(exc).__name__,
+                delay,
             )
 
-            time.sleep(RETRY_DELAY_SECONDS * (2**attempt))
+            time.sleep(delay)
 
     logger.error(
         "Embedding batch failed after %d attempts (%s).",
@@ -117,8 +136,8 @@ def _embed_batch(
     )
 
     raise RuntimeError(
-        "Could not generate embeddings. Check Vertex AI access, model "
-        "availability, region settings, and quota."
+        "Could not generate embeddings. Check Vertex AI quota, "
+        "project, model availability, and region settings."
     ) from last_error
 
 
@@ -126,16 +145,10 @@ def embed(
     texts: Sequence[str],
     task_type: str = "RETRIEVAL_DOCUMENT",
 ) -> list[list[float]]:
-    """Generate normalized embeddings in bounded batches.
+    """Generate normalized embeddings in batches, preserving input order.
 
-    Args:
-        texts: Documents or search queries to embed.
-        task_type:
-            RETRIEVAL_DOCUMENT when indexing trial text.
-            RETRIEVAL_QUERY when searching for relevant trials.
-
-    Returns:
-        One unit-normalized embedding vector per input text, in input order.
+    RETRIEVAL_DOCUMENT is for indexing trial text.
+    RETRIEVAL_QUERY is for embedding patient search queries.
     """
     validated_task_type = _validate_task_type(task_type)
 
@@ -149,12 +162,16 @@ def embed(
 
     for index, text in enumerate(texts):
         if not isinstance(text, str):
-            raise ValueError(f"Input at position {index} must be a string.")
+            raise ValueError(
+                f"Input at position {index} must be a string."
+            )
 
         cleaned = text.strip()
 
         if not cleaned:
-            raise ValueError(f"Input at position {index} is empty.")
+            raise ValueError(
+                f"Input at position {index} is empty."
+            )
 
         clean_texts.append(cleaned)
 
@@ -168,10 +185,28 @@ def embed(
     )
 
     all_vectors: list[list[float]] = []
+    last_request_time: float | None = None
 
     try:
-        for start in range(0, len(clean_texts), BATCH_SIZE):
+        total = len(clean_texts)
+
+        for start in range(0, total, BATCH_SIZE):
             batch = clean_texts[start : start + BATCH_SIZE]
+
+            # Pace requests to reduce quota bursts.
+            if last_request_time is not None:
+                elapsed = time.monotonic() - last_request_time
+                wait_time = REQUEST_INTERVAL_SECONDS - elapsed
+
+                if wait_time > 0:
+                    time.sleep(wait_time)
+
+            logger.info(
+                "Embedding batch %d/%d (%d texts).",
+                start // BATCH_SIZE + 1,
+                math.ceil(total / BATCH_SIZE),
+                len(batch),
+            )
 
             vectors = _embed_batch(
                 client=client,
@@ -179,11 +214,19 @@ def embed(
                 task_type=validated_task_type,
             )
 
+            last_request_time = time.monotonic()
             all_vectors.extend(vectors)
 
-        if len(all_vectors) != len(clean_texts):
+            logger.info(
+                "Embedded %d/%d chunks.",
+                len(all_vectors),
+                total,
+            )
+
+        if len(all_vectors) != total:
             raise RuntimeError(
-                "The number of generated vectors does not match the input count."
+                "The number of generated vectors does not match "
+                "the input count."
             )
 
         return all_vectors

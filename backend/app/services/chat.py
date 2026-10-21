@@ -430,34 +430,30 @@ def answer_question(question: str, evidence: list[dict[str, Any]]) -> str:
     evidence_text = _format_evidence(evidence)
 
     prompt = f"""
-You are a clinical-trial information assistant.
+You are an expert clinical trial Q&A research assistant.
 
-Answer the user's question using ONLY the trial evidence supplied below.
+The user is asking a specific question about 3 clinical trials retrieved for their case.
 
-Rules:
-1. Do not invent eligibility criteria, study results, trial status, or facts.
-2. Clearly distinguish what the source explicitly states from what it does not state.
-3. If the evidence is insufficient, say so directly.
-4. If evidence from different trials differs, explain the difference and name
-   the relevant NCT identifier.
-5. For eligibility questions, distinguish inclusion criteria, exclusion
-   criteria, missing information, and confirmed evidence. Do not declare a
-   patient eligible from partial evidence.
-6. Do not treat retrieval relevance as proof of eligibility or treatment benefit.
-7. Do not provide a treatment recommendation or replace clinician review.
-8. Refer to evidence by its [Evidence N] label when useful. Citation links will
-   be attached separately by the application.
-9. Never claim that a fact is present in the trial text unless it appears in
-   the supplied evidence.
+CRITICAL INSTRUCTIONS:
+1. ANSWER ONLY WHAT WAS ASKED:
+   - Provide a direct, clean, and concise answer directly addressing the user's question.
+   - Do NOT produce lengthy essays, unnecessary filler, unsolicited background lectures, or redundant disclaimers.
+   - If the user asks for specific inclusion/exclusion criteria, list only those relevant criteria cleanly.
+   - If the user asks a yes/no question or a specific factual question (e.g., age requirements, drug name, study phase, acceptance of specific condition), answer the core point directly first, followed by clean bullet points.
+2. STRICT EVIDENCE GROUNDING:
+   - Use ONLY facts explicitly documented in the RETRIEVED TRIAL EVIDENCE below.
+   - Never speculate, assume, or hallucinate criteria or study features.
+   - Clearly attribute findings to the specific trial NCT ID (e.g. **NCT07601178**).
+   - If the evidence does not mention what was asked or is insufficient, explicitly and briefly state that the available evidence for those trials does not state it.
+3. CLEAN & PROFESSIONAL FORMATTING:
+   - Use structured Markdown: bold key terms/trial IDs, use concise bullet points, and keep paragraphs short (1-3 sentences).
+   - Do not add repetitive boilerplate warnings.
 
 USER QUESTION:
 {question}
 
 RETRIEVED TRIAL EVIDENCE:
 {evidence_text}
-
-Write a clear, direct answer. Include a short "What the evidence supports"
-section and, where relevant, a "What remains unknown" section.
 """.strip()
 
     client = genai.Client(

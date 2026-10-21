@@ -10,31 +10,31 @@ Pipeline:
 The retrieval score measures relevance, not clinical eligibility.
 """
 
-from __future__ import annotations
+from __future__ import annotations #Delays evaluation of type annotations
 
-import asyncio
-import logging
-from typing import Any
+import asyncio # it supports asyncronous programming, allowing for concurrent execution of tasks
+import logging # logging records information about the applications execution, including errors and warnings
+from typing import Any # Any is a type hint that allows a value to have different data types
 
-from app.config import settings
+from app.config import settings # this imports settings from your project's config.py file
 from app.schemas import (
     CriterionResult,
     MatchResponse,
     PatientProfile,
     TrialMatch,
-)
+) # This imports several classes from the app.schemas module, which are used to define the structure of data in the application
 from app.services.eligibility_judge import compute_verdict, judge
 from app.services.patient_parser import parse_patient
 from app.services.retriever import retrieve
 from app.services.trial_store import trials
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) # creates a logger for the current python file so we can record messages, warnings, and errors.
 
 DISCLAIMER = (
     "This tool provides research assistance, not a medical diagnosis or treatment "
     "recommendation. Trial matches are preliminary. A qualified clinical team must "
     "verify the official eligibility criteria and confirm eligibility."
-)
+) # this variable stores a medical disclaimer message that informs users that the tool is for research assistance only and does not provide medical advice or recommendations.
 
 
 def _text(value: Any) -> str:
@@ -42,20 +42,27 @@ def _text(value: Any) -> str:
         return ""
     if isinstance(value, (list, dict)):
         return ""
-    return str(value).strip()
+    return str(value).strip() # this helper function converts a value into a clean string. It returns an emoty string for None, lists, and dictionaries
 
 
 def _trial_id(trial: dict[str, Any]) -> str:
-    return _text(trial.get("nct_id")).upper()
+    return _text(trial.get("nct_id")).upper() # extracts a clinical trial's ID from a dictionary and converts it to uppercase
 
 
-def _trial_title(trial: dict[str, Any]) -> str:
+def _trial_title(trial: dict[str, Any]) -> str: #Gets the best available title for a clinical trial. If one title is missing, it tries another field
     return (
         _text(trial.get("brief_title"))
         or _text(trial.get("title"))
         or _text(trial.get("official_title"))
         or _trial_id(trial)
-    )
+    ) 
+
+'''The or operator checks values from left to right and returns the first non-empty string.
+1. trial.get("brief_title") — tries the short trial title.
+2. trial.get("title") — if the first is missing or empty, tries title.
+3. trial.get("official_title") — if the previous options are empty, tries the official title.
+4. _trial_id(trial) — if no title is available, uses the trial ID as a fallback.
+The _text() helper converts missing values into empty strings and cleans whitespace.'''
 
 
 def _trial_url(nct_id: str) -> str:

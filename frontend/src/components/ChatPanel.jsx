@@ -1,7 +1,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = "";
 
 const SUGGESTIONS = [
   "Why might this patient be excluded?",
@@ -9,6 +9,83 @@ const SUGGESTIONS = [
   "What information is still missing?",
   "Summarise the strongest evidence",
 ];
+
+function formatAnswer(text) {
+  if (!text) return null;
+
+  // Split into lines to parse paragraphs, bullet points, headers, bold text
+  const lines = text.split("\n");
+  const elements = [];
+  let currentList = [];
+
+  const flushList = () => {
+    if (currentList.length > 0) {
+      elements.push(
+        <ul className="chat-bullet-list" key={`list-${elements.length}`}>
+          {currentList.map((item, idx) => (
+            <li key={idx}>{renderInline(item)}</li>
+          ))}
+        </ul>
+      );
+      currentList = [];
+    }
+  };
+
+  const renderInline = (str) => {
+    // Basic bold **text** parsing
+    const parts = str.split(/(\*\*.*?\*\*)/g);
+    return parts.map((part, i) => {
+      if (part.startsWith("**") && part.endsWith("**")) {
+        return <strong key={i}>{part.slice(2, -2)}</strong>;
+      }
+      return part;
+    });
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+
+    if (!line) {
+      flushList();
+      continue;
+    }
+
+    // Markdown Headers (### or ##)
+    if (line.startsWith("### ") || line.startsWith("## ")) {
+      flushList();
+      const headingText = line.replace(/^#{2,3}\s+/, "");
+      elements.push(
+        <h4 className="chat-answer-heading" key={`h-${i}`}>
+          {renderInline(headingText)}
+        </h4>
+      );
+      continue;
+    }
+
+    // Bullet points (* or -)
+    if (line.startsWith("* ") || line.startsWith("- ")) {
+      currentList.push(line.slice(2));
+      continue;
+    }
+
+    // Numbered list (1. or 2.)
+    if (/^\d+\.\s+/.test(line)) {
+      currentList.push(line.replace(/^\d+\.\s+/, ""));
+      continue;
+    }
+
+    // Regular paragraph
+    flushList();
+    elements.push(
+      <p className="chat-answer-p" key={`p-${i}`}>
+        {renderInline(line)}
+      </p>
+    );
+  }
+
+  flushList();
+  return elements;
+}
 
 export default function ChatPanel({
   trialIds = [],
@@ -228,7 +305,7 @@ export default function ChatPanel({
 
                   <div className="chat-a-content">
                     <div className="chat-a-bubble">
-                      {item.answer}
+                      {formatAnswer(item.answer)}
                     </div>
 
                     {item.citations.length > 0 && (

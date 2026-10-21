@@ -21,6 +21,7 @@ from app.schemas import (
     MatchResponse,
 )
 from app.services.chat import chat_answer
+from app.services import pipeline
 from app.services.pipeline import run as run_matching_pipeline
 from app.services.trial_store import trials
 
@@ -213,8 +214,12 @@ def root():
 @app.get("/api/health", tags=["system"])
 def health():
     """Liveness check: confirms that the API process is responding."""
-
-    return {"status": "ok"}
+    indexed_count = 0
+    try:
+        indexed_count = len(trials() or [])
+    except Exception:
+        pass
+    return {"status": "ok", "trials_indexed": indexed_count}
 
 
 @app.get("/api/ready", tags=["system"])
