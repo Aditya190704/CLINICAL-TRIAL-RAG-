@@ -276,7 +276,7 @@ def match(
     )
 
     try:
-        return run_matching_pipeline(req.patient_case)
+        return pipeline.run(req.patient_case)
 
     except ValueError as exc:
         raise HTTPException(
@@ -295,7 +295,8 @@ def match(
             status_code=503,
             detail=(
                 "A required service is unavailable "
-                "or access is not configured."
+                "or access is not configured. "
+                "Check BigQuery IAM permissions and service credentials."
             ),
         ) from exc
 
@@ -421,7 +422,8 @@ def trial_chat(
             status_code=503,
             detail=(
                 "A required service is unavailable "
-                "or access is not configured."
+                "or access is not configured. "
+                "Check BigQuery IAM permissions and service credentials."
             ),
         ) from exc
 

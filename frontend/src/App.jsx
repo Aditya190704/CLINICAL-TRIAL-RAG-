@@ -1,492 +1,491 @@
+import React, { useState, useEffect, useRef } from "react";
+import AppShell from "./components/layout/AppShell";
+import Header from "./components/layout/Header";
+import Footer from "./components/layout/Footer";
+import SessionSidebar from "./components/session/SessionSidebar";
+import ResultsOverview from "./components/results/ResultsOverview";
+import PatientProfileCard from "./components/results/PatientProfileCard";
+import TrialTabs from "./components/results/TrialTabs";
+import TrialDetailView from "./components/results/TrialDetailView";
+import ChatDrawer from "./components/chat/ChatDrawer";
+import Toast from "./components/ui/Toast";
+import Button from "./components/ui/Button";
+import { SkeletonCard } from "./components/ui/Skeleton";
 
-import { useEffect, useRef, useState } from "react";
-import { matchPatient } from "./api";
-import ProfilePanel from "./components/ProfilePanel";
-import TrialCard from "./components/TrialCard";
-import ChatPanel from "./components/ChatPanel";
+import { matchPatient, checkHealth } from "./api";
+import { useSessionManager } from "./hooks/useSessionManager";
+import { useToast } from "./hooks/useToast";
 
-const SAMPLE = `62-year-old woman with newly diagnosed stage IIIB non-small cell lung cancer, adenocarcinoma, EGFR exon 19 deletion positive, PD-L1 40%. ECOG performance status 1. Past medical history: type 2 diabetes controlled on metformin, hypertension on lisinopril. No prior systemic chemotherapy or radiotherapy. Brain MRI shows no metastases. Creatinine 0.9 mg/dL, ALT within normal limits. Never smoker. No history of interstitial lung disease.`;
+const SAMPLE_CASE = `62-year-old woman with newly diagnosed stage IIIB non-small cell lung cancer, adenocarcinoma, EGFR exon 19 deletion positive, PD-L1 40%. ECOG performance status 1. Past medical history: type 2 diabetes controlled on metformin, hypertension on lisinopril. No prior systemic chemotherapy or radiotherapy. Brain MRI shows no metastases. Creatinine 0.9 mg/dL, ALT within normal limits. Never smoker. No history of interstitial lung disease.`;
 
-const STEPS = [
-  "Reading the patient case",
-  "Searching recruiting trials",
-  "Checking eligibility criteria",
-  "Verifying evidence and citations",
+const MATCH_STEPS = [
+  "Extracting patient demographics, condition & biomarkers",
+  "Executing BigQuery semantic vector search",
+  "Evaluating trial eligibility rules with Gemini",
+  "Verifying verbatim quotes & computing final verdicts",
 ];
 
-const VERDICT_LABELS = {
-  ELIGIBLE: "Likely eligible",
-  POSSIBLY_ELIGIBLE: "Possibly eligible",
-  EXCLUDED: "Excluded",
-};
-
 export default function App() {
-  const [text, setText] = useState("");
-  const [data, setData] = useState(null);
+  const {
+    sessions,
+    activeSessionId,
+    activeSession,
+    switchSession,
+    createNewSession,
+    updateActiveSession,
+    renameSession,
+    deleteSession,
+    clearAllSessions,
+  } = useSessionManager();
+
+  const { toast, showToast, hideToast } = useToast();
+
+  // Local state bound to active session
+  const [patientText, setPatientText] = useState("");
   const [loading, setLoading] = useState(false);
+  const [matchStep, setMatchStep] = useState(0);
   const [error, setError] = useState("");
-  const [step, setStep] = useState(0);
-  const [activeTab, setActiveTab] = useState(0);
-  const [chatOpen, setChatOpen] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [healthStatus, setHealthStatus] = useState("online");
+  const [trialCount, setTrialCount] = useState(484);
 
   const resultsRef = useRef(null);
 
+  // Sync local text input when active session changes
   useEffect(() => {
-    if (!loading) return undefined;
+    if (activeSession) {
+      setPatientText(activeSession.patientCase || "");
+      setError("");
+    }
+  }, [activeSession?.id]);
 
-    setStep(0);
-
-    const timer = window.setInterval(() => {
-      setStep((current) =>
-        Math.min(current + 1, STEPS.length - 1)
-      );
-    }, 5500);
-
-    return () => window.clearInterval(timer);
-  }, [loading]);
-
+  // Check backend health on mount
   useEffect(() => {
-    if (!chatOpen) return undefined;
-
-    const handleEscape = (event) => {
-      if (event.key === "Escape") {
-        setChatOpen(false);
-      }
-    };
-
-    window.addEventListener("keydown", handleEscape);
+    let mounted = true;
+    checkHealth()
+      .then((res) => {
+        if (!mounted) return;
+        if (res && res.status === "ok") {
+          setHealthStatus("online");
+          if (res.trials_indexed) setTrialCount(res.trials_indexed);
+        } else {
+          setHealthStatus("offline");
+        }
+      })
+      .catch(() => {
+        if (mounted) setHealthStatus("offline");
+      });
 
     return () => {
-      window.removeEventListener("keydown", handleEscape);
+      mounted = false;
     };
-  }, [chatOpen]);
+  }, []);
 
-  async function submit() {
-    if (loading || text.trim().length < 40) return;
+  // Step ticker animation during loading
+  useEffect(() => {
+    if (!loading) {
+      setMatchStep(0);
+      return undefined;
+    }
+
+    setMatchStep(0);
+    const interval = setInterval(() => {
+      setMatchStep((prev) => Math.min(prev + 1, MATCH_STEPS.length - 1));
+    }, 4500);
+
+    return () => clearInterval(interval);
+  }, [loading]);
+
+  // Handle case submission
+  const handleSubmit = async (e) => {
+    e?.preventDefault();
+    const cleanCase = patientText.trim();
+    if (cleanCase.length < 40 || loading) return;
 
     setLoading(true);
     setError("");
-    setData(null);
-    setActiveTab(0);
-    setChatOpen(false);
 
     try {
-      const result = await matchPatient(text.trim());
+      const result = await matchPatient(cleanCase);
 
       if (!result || !Array.isArray(result.matches)) {
-        throw new Error(
-          "The server response does not contain a valid matches list."
-        );
+        throw new Error("Invalid response format received from matching service.");
       }
 
-      setData(result);
+      // Save match result to current active session
+      updateActiveSession({
+        patientCase: cleanCase,
+        data: result,
+        activeTab: 0,
+      });
 
-      window.setTimeout(() => {
+      showToast(
+        `Retrieved and evaluated ${result.matches.length} candidate trials`,
+        "success"
+      );
+
+      // Smooth scroll to results
+      setTimeout(() => {
         resultsRef.current?.scrollIntoView({
           behavior: "smooth",
           block: "start",
         });
-      }, 120);
+      }, 150);
     } catch (err) {
-      setError(
-        err?.message ||
-          "Something went wrong while matching trials."
-      );
+      const msg = err?.message || "Failed to match clinical trials.";
+      setError(msg);
+      showToast(msg, "error");
     } finally {
       setLoading(false);
     }
-  }
+  };
 
-  function handleKeyDown(event) {
-    if (
-      (event.ctrlKey || event.metaKey) &&
-      event.key === "Enter"
-    ) {
-      event.preventDefault();
-      submit();
-    }
-  }
+  const handleTextChange = (e) => {
+    const val = e.target.value;
+    setPatientText(val);
+    updateActiveSession({ patientCase: val });
+  };
 
-  const matches = data?.matches ?? [];
-  const selectedMatch = matches[activeTab];
+  const handleLoadSample = () => {
+    setPatientText(SAMPLE_CASE);
+    updateActiveSession({ patientCase: SAMPLE_CASE });
+    showToast("Loaded sample NSCLC clinical case", "info");
+  };
+
+  const handleClearCase = () => {
+    setPatientText("");
+    updateActiveSession({ patientCase: "", data: null });
+  };
+
+  const handleSelectTab = (index) => {
+    updateActiveSession({ activeTab: index });
+  };
+
+  const handleUpdateChatHistory = (newHistory) => {
+    updateActiveSession({ chatHistory: newHistory });
+  };
+
+  const handleCopySummary = () => {
+    if (!activeSession?.data?.matches) return;
+    const matches = activeSession.data.matches;
+    const lines = [
+      `Clinical Trial Match Summary (${matches.length} candidate trials)`,
+      `Session: ${activeSession.title}`,
+      `Date: ${new Date().toLocaleDateString()}`,
+      "",
+      ...matches.map(
+        (m, i) =>
+          `#${i + 1} [${m.verdict}] ${m.nct_id}: ${m.title} (Match: ${Math.round(
+            (m.relevance_score || 0) * 100
+          )}%)`
+      ),
+    ];
+    navigator.clipboard.writeText(lines.join("\n")).catch(() => {});
+    showToast("Summary copied to clipboard", "success");
+  };
+
+  const currentData = activeSession?.data || null;
+  const currentMatches = currentData?.matches || [];
+  const currentActiveTab = Math.min(
+    activeSession?.activeTab || 0,
+    Math.max(0, currentMatches.length - 1)
+  );
+  const selectedMatch = currentMatches[currentActiveTab] || null;
 
   return (
-    <div className="app-shell">
-      {/* Header */}
-      <header className="app-header">
-        <a
-          className="header-brand"
-          href="#top"
-          aria-label="Clinical Trial Matcher home"
-        >
-          <div className="header-logo" aria-hidden="true">
-            ✚
-          </div>
-
+    <AppShell
+      isSidebarOpen={isSidebarOpen}
+      header={
+        <Header
+          healthStatus={healthStatus}
+          trialCount={trialCount}
+          sessionCount={sessions.length}
+          isSidebarOpen={isSidebarOpen}
+          onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
+          onNewSession={() => {
+            createNewSession();
+            showToast("Started a new patient matching session", "info");
+          }}
+          onLoadSample={handleLoadSample}
+          hasResults={currentMatches.length > 0}
+          onOpenChat={() => setIsChatOpen(true)}
+        />
+      }
+      sidebar={
+        <SessionSidebar
+          isOpen={isSidebarOpen}
+          onClose={() => setIsSidebarOpen(false)}
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          onSelectSession={(id) => {
+            switchSession(id);
+            showToast("Loaded session", "info");
+          }}
+          onNewSession={() => {
+            createNewSession();
+            showToast("Started a new session", "info");
+          }}
+          onRenameSession={(id, title) => {
+            renameSession(id, title);
+            showToast("Session renamed", "success");
+          }}
+          onDeleteSession={(id) => {
+            deleteSession(id);
+            showToast("Session removed", "info");
+          }}
+          onClearAllSessions={() => {
+            clearAllSessions();
+            showToast("All sessions cleared", "info");
+          }}
+        />
+      }
+      footer={<Footer />}
+    >
+      {/* ── Main Input Card ── */}
+      <section className="input-panel-section">
+        <div className="section-header-row">
           <div>
-            <div className="header-title">
-              Clinical Trial Matcher
-            </div>
-
-            <div className="header-subtitle">
-              Evidence-first clinical research assistant
-            </div>
-          </div>
-        </a>
-
-        <div className="header-steps">
-          {["Paste case", "Match trials", "Review evidence"].map(
-            (label, index) => (
-              <div className="step-pill" key={label}>
-                <span className="step-num">{index + 1}</span>
-                {label}
-              </div>
-            )
-          )}
-        </div>
-
-        <div className="header-status">
-          <span className="status-dot" />
-          Research workspace
-        </div>
-      </header>
-
-      <main id="top">
-        {/* Hero and patient input */}
-        <section className="hero-section">
-          <div className="hero-eyebrow">
-            <span className="hero-badge-dot" />
-            CLINICAL RESEARCH WORKSPACE
+            <span className="section-eyebrow">PATIENT CASE INTAKE</span>
+            <h2 className="section-heading">Clinical Narrative Analysis</h2>
+            <p className="section-subtext">
+              Enter an anonymized clinical note (age, sex, histology, stage, biomarkers, prior therapies, comorbidities, and laboratory values).
+            </p>
           </div>
 
-          <h1 className="hero-title">
-            Find relevant trials.
-            <br />
-            <span>Understand the evidence.</span>
-          </h1>
-
-          <p className="hero-desc">
-            Enter an anonymised patient case to retrieve relevant
-            clinical trials and review each eligibility criterion
-            against the available evidence.
-          </p>
-
-          <div className="input-card">
-            <div className="input-card-top">
-              <div>
-                <div className="input-label-text">
-                  <span className="label-icon">01</span>
-                  Patient case
-                </div>
-
-                <p className="input-helper">
-                  Include diagnosis, stage, biomarkers, previous
-                  treatment, comorbidities and relevant lab results.
-                </p>
-              </div>
-
-              <button
-                className="load-sample-btn"
-                type="button"
-                onClick={() => setText(SAMPLE)}
+          <div className="input-quick-actions">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleLoadSample}
+              icon="📄"
+              title="Load sample stage IIIB NSCLC case"
+            >
+              Use Sample Case
+            </Button>
+            {patientText && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleClearCase}
+                title="Clear patient input"
               >
-                Use sample case <span>↗</span>
-              </button>
-            </div>
+                Clear
+              </Button>
+            )}
+          </div>
+        </div>
 
+        <form onSubmit={handleSubmit} className="case-input-form">
+          <div className="textarea-wrapper">
             <textarea
-              className="case-textarea"
-              value={text}
-              onChange={(event) => setText(event.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Paste an anonymised patient case here..."
-              aria-label="Anonymised patient case"
-              maxLength={12000}
+              className="patient-textarea"
+              value={patientText}
+              onChange={handleTextChange}
+              placeholder="Paste anonymized patient summary: e.g. 62-year-old woman with stage IIIB non-small cell lung cancer, EGFR exon 19 deletion positive, ECOG 1, prior metformin for diabetes, normal renal function..."
+              rows={5}
               disabled={loading}
+              aria-label="Anonymized patient case"
             />
+          </div>
 
-            <div className="input-footer">
+          <div className="input-action-bar">
+            <div className="char-indicator">
               <span
-                className={`char-count ${
-                  text.trim().length >= 40 ? "ready" : ""
+                className={`char-count-pill ${
+                  patientText.trim().length >= 40 ? "char-valid" : "char-insufficient"
                 }`}
               >
-                <span className="privacy-icon">⌑</span>
-                {text.length.toLocaleString()} characters ·{" "}
-                {text.trim().length < 40
-                  ? `${40 - text.trim().length} more needed`
-                  : "Ready to analyse"}{" "}
-                · Ctrl/⌘ + Enter
+                {patientText.trim().length} characters
               </span>
-
-              <button
-                className="analyze-btn"
-                disabled={loading || text.trim().length < 40}
-                onClick={submit}
-              >
-                {loading ? (
-                  <>
-                    <span className="button-spinner" />
-                    Analysing case...
-                  </>
-                ) : (
-                  <>
-                    Find matching trials
-                    <span aria-hidden="true">→</span>
-                  </>
-                )}
-              </button>
+              <span className="char-min-note">
+                {patientText.trim().length < 40
+                  ? `(minimum 40 characters required, ${40 - patientText.trim().length} more needed)`
+                  : "✓ Ready for trial matching"}
+              </span>
             </div>
 
-            {error && (
-              <div className="error-banner" role="alert">
-                <strong>Could not complete the request.</strong>
-                <span>{error}</span>
-              </div>
-            )}
+            <Button
+              variant="primary"
+              size="lg"
+              type="submit"
+              disabled={loading || patientText.trim().length < 40}
+              loading={loading}
+              icon="🔍"
+              title="Run vector retrieval and Gemini eligibility judge"
+            >
+              {loading ? "Matching Trials..." : "Find Matching Trials"}
+            </Button>
           </div>
 
-          <div className="trust-row">
-            <span>✓ Evidence-linked results</span>
-            <span>✓ Criterion-level review</span>
-            <span>✓ Source citations</span>
+          {error && (
+            <div className="error-banner" role="alert">
+              <span className="error-icon">⚠</span>
+              <span className="error-text">{error}</span>
+            </div>
+          )}
+        </form>
+      </section>
+
+      {/* ── Stepped Loading State ── */}
+      {loading && (
+        <section className="loading-state-panel" aria-live="polite">
+          <div className="loading-card">
+            <div className="loading-header">
+              <div className="loading-spinner-orbit" />
+              <div>
+                <h3 className="loading-title">Matching Patient Case</h3>
+                <p className="loading-subtitle">
+                  Retrieving candidate trials from BigQuery and evaluating criteria against documented patient facts.
+                </p>
+              </div>
+            </div>
+
+            <div className="steps-progress-list">
+              {MATCH_STEPS.map((step, idx) => {
+                const isDone = idx < matchStep;
+                const isCurrent = idx === matchStep;
+
+                return (
+                  <div
+                    key={idx}
+                    className={`step-item ${isDone ? "step-done" : isCurrent ? "step-current" : "step-pending"}`}
+                  >
+                    <div className="step-circle">
+                      {isDone ? "✓" : isCurrent ? <span className="step-pulse" /> : idx + 1}
+                    </div>
+                    <span className="step-label">{step}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Shimmer skeleton placeholders */}
+          <div className="skeleton-grid">
+            <SkeletonCard />
+            <SkeletonCard />
           </div>
         </section>
-
-        {/* Loading state */}
-        {loading && (
-          <section className="loading-section" aria-live="polite">
-            <div className="loading-orb">
-              <span className="loading-spinner" />
-            </div>
-
-            <div className="loading-title">
-              Reviewing the patient case
-            </div>
-
-            <p className="loading-desc">
-              Retrieving trial evidence and checking the available
-              eligibility information.
-            </p>
-
-            <ul className="loading-steps">
-              {STEPS.map((label, index) => (
-                <li
-                  key={label}
-                  className={`loading-step ${
-                    index < step
-                      ? "done"
-                      : index === step
-                      ? "active"
-                      : ""
-                  }`}
-                >
-                  <span className="step-icon">
-                    {index < step ? (
-                      "✓"
-                    ) : index === step ? (
-                      <span className="mini-spinner" />
-                    ) : (
-                      index + 1
-                    )}
-                  </span>
-                  {label}
-                </li>
-              ))}
-            </ul>
-
-            <div className="progress-bar">
-              <div className="progress-fill" />
-            </div>
-          </section>
-        )}
-
-        {/* Initial empty state */}
-        {!loading && !data && (
-          <section className="empty-section">
-            <div className="empty-visual">
-              <div className="empty-icon-wrap">⌕</div>
-              <span className="orbit orbit-one" />
-              <span className="orbit orbit-two" />
-            </div>
-
-            <div className="empty-kicker">
-              YOUR RESULTS WILL APPEAR HERE
-            </div>
-
-            <h2 className="empty-title">
-              Start with a patient profile
-            </h2>
-
-            <p className="empty-desc">
-              Run a search to see your trial matches, eligibility
-              reasoning, criteria status and source evidence.
-            </p>
-
-            <div className="legend-row">
-              <span className="legend-tag met">
-                <i /> Criterion supported
-              </span>
-
-              <span className="legend-tag blocks">
-                <i /> Potential exclusion
-              </span>
-
-              <span className="legend-tag unknown">
-                <i /> Needs more information
-              </span>
-            </div>
-          </section>
-        )}
-
-        {/* Search results */}
-        {data && !loading && (
-          <section className="results-section" ref={resultsRef}>
-            <div className="section-eyebrow">MATCH RESULTS</div>
-
-            <div className="results-header">
-              <div>
-                <h2 className="results-heading">
-                  Your trial shortlist
-                </h2>
-
-                <p className="results-subheading">
-                  Review the evidence before interpreting eligibility.
-                </p>
-              </div>
-
-              <div className="results-summary">
-                <strong>{matches.length}</strong>
-                <span>trials found</span>
-              </div>
-            </div>
-
-            {data.patient_profile && (
-              <ProfilePanel profile={data.patient_profile} />
-            )}
-
-            {matches.length === 0 ? (
-              <div className="no-matches">
-                <div className="no-matches-icon">⌕</div>
-                <h3>No matching trials returned</h3>
-                <p>
-                  Try adding more clinical details or check the
-                  backend logs for retrieval errors.
-                </p>
-              </div>
-            ) : (
-              <>
-                {/* Trial selector */}
-                <div
-                  className="trial-tabs"
-                  role="tablist"
-                  aria-label="Matched trials"
-                >
-                  {matches.map((match, index) => (
-                    <button
-                      key={match.nct_id || index}
-                      type="button"
-                      role="tab"
-                      aria-selected={index === activeTab}
-                      className={`trial-tab ${
-                        index === activeTab ? "active" : ""
-                      }`}
-                      onClick={() => setActiveTab(index)}
-                    >
-                      <div className="tab-topline">
-                        <span className="tab-rank-badge">
-                          MATCH #{match.rank ?? index + 1}
-                        </span>
-
-                        <span
-                          className={`verdict-pill ${
-                            match.verdict || "POSSIBLY_ELIGIBLE"
-                          }`}
-                        >
-                          {VERDICT_LABELS[match.verdict] ||
-                            "Needs review"}
-                        </span>
-                      </div>
-
-                      <div className="tab-trial-title">
-                        {match.title || "Untitled clinical trial"}
-                      </div>
-
-                      <div className="tab-trial-id">
-                        {match.nct_id || "Trial ID unavailable"}
-                        <span>↗</span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-
-                {selectedMatch && (
-                  <TrialCard
-                    key={selectedMatch.nct_id || activeTab}
-                    match={selectedMatch}
-                    index={activeTab}
-                  />
-                )}
-
-                {/* Chat launcher */}
-                <div className="chat-launcher-section">
-                  <div className="chat-cta-copy">
-                    <span className="chat-cta-icon">✳</span>
-
-                    <div>
-                      <strong>Need to dig deeper?</strong>
-                      <p>
-                        Ask a follow-up about these trials and their
-                        criteria.
-                      </p>
-                    </div>
-                  </div>
-
-                  <button
-                    className="chat-launch-btn"
-                    type="button"
-                    onClick={() => setChatOpen(true)}
-                  >
-                    <span className="chat-btn-icon">✳</span>
-                    Ask about these trials
-                    <span className="chat-btn-arrow">↗</span>
-                  </button>
-                </div>
-              </>
-            )}
-
-            <div className="medical-disclaimer">
-              <span>ⓘ</span>
-              <p>
-                {data.disclaimer ||
-                  "This tool supports research and does not replace clinical judgement. Eligibility must be confirmed by the study team."}
-              </p>
-            </div>
-          </section>
-        )}
-      </main>
-
-      {/* AI chat modal */}
-      {chatOpen && data && matches.length > 0 && (
-        <ChatPanel
-          trialIds={matches
-            .map((match) => match.nct_id)
-            .filter(Boolean)}
-          trialTitles={matches.map((match) => ({
-            id: match.nct_id,
-            title: match.title,
-          }))}
-          patientCase={text}
-          onClose={() => setChatOpen(false)}
-        />
       )}
 
-      <footer className="app-footer">
-        <span>Clinical Trial Matcher</span>
-        <span>
-          Evidence-informed research support · Not a medical decision
-        </span>
-      </footer>
-    </div>
+      {/* ── Empty State ── */}
+      {!loading && !currentData && (
+        <section className="empty-state-panel">
+          <div className="empty-state-card">
+            <div className="empty-illustration">🔬</div>
+            <h3 className="empty-title">Ready to find recruiting clinical trials</h3>
+            <p className="empty-description">
+              Paste an anonymized case above and click <strong>Find Matching Trials</strong>. The system will retrieve the most relevant studies and audit every inclusion and exclusion criterion against your case.
+            </p>
+
+            <div className="empty-features-grid">
+              <div className="feature-pill">
+                <span className="feature-icon">⚡</span>
+                <div>
+                  <strong>BigQuery Vector Search</strong>
+                  <p>Dense semantic retrieval across 1,600+ trial criteria chunks</p>
+                </div>
+              </div>
+              <div className="feature-pill">
+                <span className="feature-icon">🛡️</span>
+                <div>
+                  <strong>Evidence-Verified Verdicts</strong>
+                  <p>Every criterion decision requires verbatim proof from source trial text</p>
+                </div>
+              </div>
+              <div className="feature-pill">
+                <span className="feature-icon">💬</span>
+                <div>
+                  <strong>Trial Q&A Assistant</strong>
+                  <p>Ask follow-up questions grounded strictly in the matched studies</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* ── Results Area ── */}
+      {!loading && currentData && (
+        <section className="results-container-section" ref={resultsRef}>
+          {/* Summary Metric Bar */}
+          <ResultsOverview
+            data={currentData}
+            onCopySummary={handleCopySummary}
+            onOpenChat={() => setIsChatOpen(true)}
+          />
+
+          {/* Extracted Patient Profile */}
+          <PatientProfileCard
+            profile={currentData.patient_profile}
+            patientCase={patientText}
+          />
+
+          {/* Top Trial Shortlist */}
+          {currentMatches.length > 0 ? (
+            <div className="matches-wrapper">
+              <div className="shortlist-header">
+                <div>
+                  <span className="section-eyebrow">TRIAL SHORTLIST</span>
+                  <h3 className="shortlist-title">Candidate Clinical Trials</h3>
+                  <p className="shortlist-subtitle">
+                    Select a trial below to review verbatim eligibility criteria and evidence citations.
+                  </p>
+                </div>
+              </div>
+
+              {/* Top 3 Tab Switcher */}
+              <TrialTabs
+                matches={currentMatches}
+                activeTab={currentActiveTab}
+                onSelectTab={handleSelectTab}
+              />
+
+              {/* Selected Trial Deep-Dive */}
+              {selectedMatch && (
+                <TrialDetailView
+                  match={selectedMatch}
+                  onOpenChat={() => setIsChatOpen(true)}
+                  onCopyNotice={(msg) => showToast(msg, "success")}
+                />
+              )}
+            </div>
+          ) : (
+            <div className="no-matches-card">
+              <h4>No relevant recruiting trials were found</h4>
+              <p>
+                Try adding more clinical details or alternative condition synonyms to your case narrative.
+              </p>
+            </div>
+          )}
+
+          {/* Regulatory & Safety Disclaimer */}
+          <div className="safety-disclaimer-box">
+            <span className="disclaimer-icon">ⓘ</span>
+            <p className="disclaimer-text">
+              {currentData.disclaimer ||
+                "Clinical Trial Matcher is a research decision-support tool. It does not provide medical diagnoses or treatment recommendations. Eligibility must always be validated by qualified clinical investigators and study sponsors."}
+            </p>
+          </div>
+        </section>
+      )}
+
+      {/* ── Slide-over Chat Drawer ── */}
+      <ChatDrawer
+        isOpen={isChatOpen}
+        onClose={() => setIsChatOpen(false)}
+        trialIds={currentMatches.map((m) => m.nct_id).filter(Boolean)}
+        trialTitles={currentMatches.map((m) => ({ id: m.nct_id, title: m.title }))}
+        patientCase={patientText}
+        sessionId={activeSessionId}
+        chatHistory={activeSession?.chatHistory || []}
+        onUpdateHistory={handleUpdateChatHistory}
+        onShowToast={showToast}
+      />
+
+      {/* ── Floating Toast ── */}
+      <Toast toast={toast} onDismiss={hideToast} />
+    </AppShell>
   );
 }

@@ -25,7 +25,7 @@ from app.schemas import CriterionResult, MatchResponse, PatientProfile, TrialMat
 from app.services.eligibility_judge import compute_verdict, judge
 from app.services.patient_parser import parse_patient
 from app.services.retriever import retrieve
-from app.services.trial_store import trials
+from app.services.trial_store import chunks, trials
 
 logger = logging.getLogger(__name__)
 
@@ -170,8 +170,11 @@ def _candidate_chunk_ids(candidate: Any) -> list[str]:
 
 def _get_trial_index() -> dict[str, dict[str, Any]]:
     """Load processed trial metadata and index it by NCT ID."""
+    raw_trials = trials()
+    if isinstance(raw_trials, dict):
+        return raw_trials
     trial_index: dict[str, dict[str, Any]] = {}
-    for trial in trials() or []:
+    for trial in raw_trials or []:
         if not isinstance(trial, dict):
             continue
         nct_id = _trial_id(trial)
@@ -186,15 +189,17 @@ def _get_passages(
     max_passages: int = 3,
 ) -> list[dict[str, str]]:
     """Return evidence passages belonging to this exact trial."""
-    from app.services.trial_store import chunks
-
-    chunk_index: dict[str, dict[str, Any]] = {}
-    for chunk in chunks() or []:
-        if not isinstance(chunk, dict):
-            continue
-        chunk_id = _text(chunk.get("chunk_id"))
-        if chunk_id:
-            chunk_index[chunk_id] = chunk
+    raw_chunks = chunks()
+    if isinstance(raw_chunks, dict):
+        chunk_index = raw_chunks
+    else:
+        chunk_index: dict[str, dict[str, Any]] = {}
+        for chunk in raw_chunks or []:
+            if not isinstance(chunk, dict):
+                continue
+            chunk_id = _text(chunk.get("chunk_id"))
+            if chunk_id:
+                chunk_index[chunk_id] = chunk
 
     passages: list[dict[str, str]] = []
     for chunk_id in _candidate_chunk_ids(candidate):

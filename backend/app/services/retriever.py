@@ -1,14 +1,17 @@
+"""BigQuery Vector Search Retriever for Clinical Trials.
 
-"""BigQuery Vector Search retrieval with Reciprocal Rank Fusion (RRF)."""
-
+Replaces Vertex AI Vector Search endpoint calls with Google Cloud BigQuery
+VECTOR_SEARCH() exact cosine distance similarity search.
+"""
 from __future__ import annotations
 
 import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
+from google.api_core import exceptions as gcp_exceptions
 from google.cloud import bigquery
 
 from app.config import settings
@@ -16,13 +19,34 @@ from app.services.embeddings import embed
 
 logger = logging.getLogger(__name__)
 
-RRF_K = 60
-MAX_SEARCH_QUERIES = 5
+# Reusable BigQuery client instance
+_client: Optional[bigquery.Client] = None
+
+
+def get_bigquery_client() -> bigquery.Client:
+    """Lazily initialize and return the BigQuery client."""
+    global _client
+    if _client is None:
+        if not settings.gcp_project:
+            raise ValueError(
+                "GCP project ID is not configured. Set GCP_PROJECT in backend/.env"
+            )
+        _client = bigquery.Client(
+            project=settings.gcp_project,
+            location=settings.bq_location,
+        )
+    return _client
+
+
+def set_bigquery_client(client: Optional[bigquery.Client]) -> None:
+    """Override the BigQuery client instance (useful for unit testing)."""
+    global _client
+    _client = client
 
 
 @dataclass
 class Candidate:
-    """A trial retrieved from one or more search queries."""
+    """Trial candidate with fused relevance and evidence chunk IDs."""
 
     nct_id: str
     rrf: float = 0.0
@@ -30,320 +54,247 @@ class Candidate:
     chunk_ids: list[str] = field(default_factory=list)
 
 
-def _table_ref() -> str:
-    project = settings.gcp_project
-    dataset = settings.bigquery_dataset
-    table = settings.bigquery_chunks_table
-
-    if not project or not dataset or not table:
-        raise RuntimeError(
-            "BigQuery retrieval configuration is incomplete. Check "
-            "GCP_PROJECT, BIGQUERY_DATASET, and BIGQUERY_CHUNKS_TABLE."
-        )
-
-    # This reference comes from application configuration, not user input.
-    return f"`{project}.{dataset}.{table}`"
-
-
 def validate_embeddings(
     vectors: list[list[float]],
     expected_dim: int | None = None,
 ) -> list[list[float]]:
-    """Validate and normalize query embeddings before sending them to BigQuery."""
+    """Validate vector dimensions, non-emptiness, and numerical values."""
     if not vectors:
-        raise ValueError("No query embeddings were generated.")
+        raise ValueError("Cannot perform vector search with empty vectors list.")
 
-    dimension = expected_dim or int(settings.embedding_dim)
+    dim = expected_dim or int(settings.embedding_dim)
     validated: list[list[float]] = []
 
-    for index, vector in enumerate(vectors):
-        if not isinstance(vector, (list, tuple)):
-            raise ValueError(f"Embedding {index} is not a vector.")
-
-        if len(vector) != dimension:
+    for idx, vec in enumerate(vectors):
+        if not isinstance(vec, (list, tuple)):
+            raise ValueError(f"Vector at index {idx} must be a list/sequence of numbers.")
+        if len(vec) != dim:
             raise ValueError(
-                f"Embedding {index} has dimension {len(vector)}; "
-                f"expected {dimension}."
+                f"Embedding dimension mismatch at index {idx}: expected {dim}, "
+                f"got {len(vec)}."
             )
-
-        try:
-            values = [float(value) for value in vector]
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Embedding {index} contains invalid values.") from exc
-
-        if not all(math.isfinite(value) for value in values):
-            raise ValueError(f"Embedding {index} contains non-finite values.")
-
-        norm = math.sqrt(sum(value * value for value in values))
-        if norm == 0:
-            raise ValueError(f"Embedding {index} has zero magnitude.")
-
-        validated.append([value / norm for value in values])
+        for dim_idx, val in enumerate(vec):
+            if val is None or math.isnan(val) or math.isinf(val):
+                raise ValueError(
+                    f"Vector at index {idx} contains invalid numerical value {val} at dimension {dim_idx}."
+                )
+        validated.append([float(x) for x in vec])
 
     return validated
 
 
 def build_vector_search_sql(
-    query_count: int,
-    top_k: int,
+    project_id: str | None = None,
+    dataset_id: str | None = None,
+    table_id: str | None = None,
+    num_queries: int | None = None,
+    query_count: int | None = None,
+    top_k: int | None = None,
 ) -> str:
-    """Build a parameterized Vector Search query for multiple search strings."""
-    if query_count < 1 or query_count > MAX_SEARCH_QUERIES:
-        raise ValueError(
-            f"Search query count must be between 1 and {MAX_SEARCH_QUERIES}."
-        )
+    """Construct a parameterized BigQuery VECTOR_SEARCH GoogleSQL query."""
+    count = num_queries if num_queries is not None else query_count
+    if count is None or count <= 0:
+        raise ValueError("num_queries must be greater than 0")
 
-    if top_k < 1:
-        raise ValueError("top_k must be greater than zero.")
+    proj = project_id or settings.gcp_project
+    ds = dataset_id or settings.bigquery_dataset
+    tbl = table_id or settings.bigquery_chunks_table
 
-    table = _table_ref()
-    parts: list[str] = []
+    subquery_parts = [
+        f"SELECT {i} AS query_id, @q{i} AS query_vector"
+        for i in range(count)
+    ]
+    query_subquery = "\n      UNION ALL\n      ".join(subquery_parts)
+    full_table_path = f"`{proj}.{ds}.{tbl}`"
 
-    for query_index in range(query_count):
-        parts.append(
-            f"""
-            SELECT
-                {query_index} AS query_id,
-                CAST(base.chunk_id AS STRING) AS chunk_id,
-                UPPER(CAST(base.nct_id AS STRING)) AS nct_id,
-                distance
-            FROM VECTOR_SEARCH(
-                TABLE {table},
-                'embedding',
-                (SELECT @q{query_index} AS query_vector),
-                query_column_to_search => 'query_vector',
-                top_k => @top_k,
-                distance_type => 'COSINE'
-            )
-            """
-        )
+    sql = f"""
+SELECT
+  query.query_id AS query_id,
+  base.chunk_id AS chunk_id,
+  base.nct_id AS nct_id,
+  base.chunk_text AS chunk_text,
+  base.chunk_type AS chunk_type,
+  base.metadata_json AS metadata_json,
+  distance
+FROM VECTOR_SEARCH(
+  TABLE {full_table_path},
+  'embedding',
+  (
+    {query_subquery}
+  ),
+  query_column_to_search => 'query_vector',
+  top_k => @top_k,
+  distance_type => 'COSINE'
+)
+ORDER BY query.query_id, distance ASC
+"""
+    return sql.strip()
 
-    return "\nUNION ALL\n".join(parts)
 
+def execute_vector_search(
+    client: bigquery.Client,
+    vectors: list[list[float]],
+    top_k: int,
+) -> list[bigquery.Row]:
+    """Execute VECTOR_SEARCH against the configured BigQuery table."""
+    project = settings.gcp_project
+    dataset = settings.bigquery_dataset
+    table = settings.bigquery_chunks_table
 
-def _safe_similarity(distance: Any) -> float:
-    """Convert cosine distance to a bounded similarity score."""
+    sql = build_vector_search_sql(
+        project_id=project,
+        dataset_id=dataset,
+        table_id=table,
+        num_queries=len(vectors),
+    )
+
+    query_params: list[bigquery.ArrayQueryParameter | bigquery.ScalarQueryParameter] = [
+        bigquery.ArrayQueryParameter(f"q{i}", "FLOAT64", [float(x) for x in vectors[i]])
+        for i in range(len(vectors))
+    ]
+    query_params.append(bigquery.ScalarQueryParameter("top_k", "INT64", top_k))
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=query_params,
+        default_dataset=f"{project}.{dataset}",
+    )
+
     try:
-        distance_value = float(distance)
-    except (TypeError, ValueError):
-        return 0.0
+        query_job = client.query(sql, job_config=job_config, location=settings.bq_location)
+        rows = list(query_job.result())
+        return rows
+    except gcp_exceptions.NotFound as e:
+        msg = (
+            f"BigQuery resource not found: `{project}.{dataset}.{table}` in location "
+            f"'{settings.bq_location}'. Ensure the dataset and table are created and populated. "
+            f"Original error: {e}"
+        )
+        logger.error(msg)
+        raise RuntimeError(msg) from e
+    except gcp_exceptions.Forbidden as e:
+        msg = (
+            f"Permission denied accessing BigQuery table `{project}.{dataset}.{table}`. "
+            f"Ensure your GCP credentials or Service Account has BigQuery Data Viewer and "
+            f"BigQuery Job User roles. Original error: {e}"
+        )
+        logger.error(msg)
+        raise PermissionError(msg) from e
+    except gcp_exceptions.BadRequest as e:
+        msg = f"BigQuery vector search query failed (BadRequest): {e}"
+        logger.error(msg)
+        raise RuntimeError(msg) from e
+    except gcp_exceptions.GoogleAPICallError as e:
+        msg = f"BigQuery vector search API call failed: {e}"
+        logger.error(msg)
+        raise RuntimeError(msg) from e
+    except Exception as e:
+        msg = f"Unexpected error during BigQuery vector search: {e}"
+        logger.error(msg)
+        raise RuntimeError(msg) from e
 
-    if not math.isfinite(distance_value):
-        return 0.0
 
-    return max(0.0, min(1.0, 1.0 - distance_value))
+def _row_val(row: Any, key: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(key, default)
+    if hasattr(row, "get"):
+        try:
+            return row.get(key, default)
+        except Exception:
+            pass
+    return getattr(row, key, default)
 
 
 def fuse_and_deduplicate(rows: list[Any]) -> list[Candidate]:
-    """Fuse per-query rankings using Reciprocal Rank Fusion.
+    """Process BigQuery vector search rows with Reciprocal Rank Fusion and NCT deduplication.
 
-    Each query contributes 1 / (RRF_K + rank) to a trial. Duplicate chunks
-    within the same query do not receive multiple contributions.
+    For cosine distance, similarity is defined as max(0.0, 1.0 - distance).
+    RRF score is calculated as 1.0 / (60 + rank) for the highest-ranking chunk
+    of each trial per query.
     """
     if not rows:
         return []
 
-    normalized_rows: list[dict[str, Any]] = []
-
+    # Group rows by query_id
+    grouped_by_query: dict[int, list[Any]] = defaultdict(list)
     for row in rows:
-        try:
-            query_id = int(row["query_id"])
-            nct_id = str(row["nct_id"]).strip().upper()
-            chunk_id = str(row["chunk_id"]).strip()
-            distance = float(row["distance"])
-        except (KeyError, TypeError, ValueError, IndexError):
-            continue
+        q_id = int(_row_val(row, "query_id", 0) or 0)
+        grouped_by_query[q_id].append(row)
 
-        if not nct_id or not chunk_id or not math.isfinite(distance):
-            continue
+    candidates: dict[str, Candidate] = defaultdict(lambda: Candidate(nct_id=""))
 
-        normalized_rows.append(
-            {
-                "query_id": query_id,
-                "nct_id": nct_id,
-                "chunk_id": chunk_id,
-                "distance": distance,
-                "similarity": _safe_similarity(distance),
-            }
-        )
+    for q_id, q_rows in grouped_by_query.items():
+        seen_trials_in_query: set[str] = set()
 
-    # Assign a rank within each query because UNION ALL does not guarantee
-    # that the combined result set preserves Vector Search ordering.
-    grouped_by_query: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for rank, row in enumerate(q_rows):
+            cid = _row_val(row, "chunk_id")
+            nct = _row_val(row, "nct_id")
+            distance = _row_val(row, "distance", 1.0)
 
-    for row in normalized_rows:
-        grouped_by_query[row["query_id"]].append(row)
-
-    trial_scores: dict[str, float] = defaultdict(float)
-    best_similarity: dict[str, float] = defaultdict(float)
-    chunk_similarity: dict[tuple[str, str], float] = {}
-    seen_query_chunks: set[tuple[int, str, str]] = set()
-
-    for query_id, query_rows in grouped_by_query.items():
-        query_rows.sort(key=lambda row: row["distance"])
-
-        for rank, row in enumerate(query_rows, start=1):
-            nct_id = row["nct_id"]
-            chunk_id = row["chunk_id"]
-
-            query_chunk_key = (query_id, nct_id, chunk_id)
-            if query_chunk_key in seen_query_chunks:
+            if not nct or not cid:
                 continue
 
-            seen_query_chunks.add(query_chunk_key)
+            nct = str(nct).strip().upper()
+            cid = str(cid).strip()
 
-            trial_scores[nct_id] += 1.0 / (RRF_K + rank)
-            best_similarity[nct_id] = max(
-                best_similarity[nct_id],
-                row["similarity"],
-            )
+            try:
+                distance_float = float(distance)
+            except (TypeError, ValueError):
+                distance_float = 1.0
 
-            chunk_key = (nct_id, chunk_id)
-            chunk_similarity[chunk_key] = max(
-                chunk_similarity.get(chunk_key, 0.0),
-                row["similarity"],
-            )
+            similarity = max(0.0, min(1.0, 1.0 - distance_float))
 
-    chunk_ids_by_trial: dict[str, list[str]] = defaultdict(list)
+            cand = candidates[nct]
+            cand.nct_id = nct
 
-    ranked_chunks = sorted(
-        chunk_similarity.items(),
-        key=lambda item: item[1],
-        reverse=True,
-    )
+            if cid not in cand.chunk_ids:
+                cand.chunk_ids.append(cid)
 
-    for (nct_id, chunk_id), _score in ranked_chunks:
-        if chunk_id not in chunk_ids_by_trial[nct_id]:
-            chunk_ids_by_trial[nct_id].append(chunk_id)
+            if nct not in seen_trials_in_query:
+                cand.rrf += 1.0 / (60 + rank)
+                seen_trials_in_query.add(nct)
 
-    candidates = [
-        Candidate(
-            nct_id=nct_id,
-            rrf=score,
-            best_sim=best_similarity[nct_id],
-            chunk_ids=chunk_ids_by_trial[nct_id],
-        )
-        for nct_id, score in trial_scores.items()
-    ]
+            cand.best_sim = max(cand.best_sim, similarity)
 
-    return sorted(
-        candidates,
-        key=lambda candidate: (
-            candidate.rrf,
-            candidate.best_sim,
-        ),
-        reverse=True,
-    )
+    return sorted(candidates.values(), key=lambda c: (c.rrf, c.best_sim), reverse=True)
 
 
 def retrieve(
     queries: list[str],
     top_k: int | None = None,
 ) -> list[Candidate]:
-    """Retrieve and fuse clinical-trial candidates for one or more queries."""
+    """Retrieve trial candidates matching the given patient queries using BigQuery VECTOR_SEARCH.
+
+    Parameters:
+        queries: List of query strings (e.g. [patient search query, case text]).
+        top_k: Optional number of chunks to retrieve per query (defaults to settings.top_k_chunks).
+
+    Returns:
+        List of Candidate objects sorted by RRF relevance descending.
+    """
     if isinstance(queries, str):
         queries = [queries]
 
-    if not queries:
-        return []
-
-    clean_queries: list[str] = []
-    for query in queries:
-        if not isinstance(query, str):
-            continue
-
-        cleaned = query.strip()
-        if cleaned and cleaned not in clean_queries:
-            clean_queries.append(cleaned)
-
-    if not clean_queries:
-        return []
-
-    clean_queries = clean_queries[:MAX_SEARCH_QUERIES]
-    effective_top_k = int(top_k or settings.top_k_chunks)
-
-    if effective_top_k < 1:
-        raise ValueError("top_k must be greater than zero.")
-
-    try:
-        raw_vectors = embed(
-            clean_queries,
-            task_type="RETRIEVAL_QUERY",
-        )
-        vectors = validate_embeddings(raw_vectors)
-    except Exception as exc:
-        logger.error(
-            "Query embedding failed (%s).",
-            type(exc).__name__,
-        )
-        raise RuntimeError(
-            "Could not create search embeddings. Please try again later."
-        ) from exc
-
-    if len(vectors) != len(clean_queries):
-        raise RuntimeError(
-            "The embedding service returned a different number of vectors "
-            "than the number of search queries."
-        )
-
-    sql = build_vector_search_sql(
-        query_count=len(vectors),
-        top_k=effective_top_k,
-    )
-
-    parameters: list[bigquery.QueryParameter] = [
-        bigquery.ScalarQueryParameter(
-            "top_k",
-            "INT64",
-            effective_top_k,
-        )
+    valid_queries = [
+        q.strip()
+        for q in queries
+        if isinstance(q, str) and q.strip()
     ]
+    if not valid_queries:
+        logger.warning("Empty or whitespace-only queries provided to retrieve(); returning empty list.")
+        return []
 
-    for index, vector in enumerate(vectors):
-        parameters.append(
-            bigquery.ArrayQueryParameter(
-                f"q{index}",
-                "FLOAT64",
-                vector,
-            )
-        )
+    # Generate embeddings using the existing embedding service
+    vectors = embed(valid_queries, task_type="RETRIEVAL_QUERY")
 
-    client = bigquery.Client(
-        project=settings.gcp_project,
-        location=settings.bq_location,
-    )
+    # Validate vector format and dimension
+    validate_embeddings(vectors, expected_dim=settings.embedding_dim)
 
-    try:
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=parameters,
-        )
+    # Get BigQuery client
+    client = get_bigquery_client()
 
-        rows = list(
-            client.query(
-                sql,
-                job_config=job_config,
-            ).result()
-        )
+    # Execute search
+    effective_top_k = int(top_k or settings.top_k_chunks)
+    rows = execute_vector_search(client, vectors, top_k=effective_top_k)
 
-        candidates = fuse_and_deduplicate(rows)
-
-        logger.info(
-            "Vector retrieval completed: queries=%d, candidates=%d.",
-            len(clean_queries),
-            len(candidates),
-        )
-
-        return candidates
-
-    except Exception as exc:
-        logger.error(
-            "BigQuery Vector Search failed (%s).",
-            type(exc).__name__,
-        )
-        raise RuntimeError(
-            "Clinical-trial retrieval failed. Check BigQuery access, "
-            "the vector index, and the configured table."
-        ) from exc
-
-    finally:
-        client.close()
+    # Fuse, deduplicate, and sort candidates
+    return fuse_and_deduplicate(rows)
