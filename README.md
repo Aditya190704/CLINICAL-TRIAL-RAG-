@@ -4,10 +4,10 @@ Clinical Trial RAG is a patient-to-trial matching application that helps a clini
 
 - a FastAPI backend,
 - a React frontend,
-- Google Cloud BigQuery vector search
-,
+- Google Cloud BigQuery vector search,
 - Vertex AI Gemini models for parsing and eligibility checking,
-- and a workflow that ranks candidate trials using both similarity and evidence-based review.
+- an asynchronous Python workflow that ranks candidate trials using relevance and evidence-based review,
+- and an evidence-grounded chat endpoint for follow-up questions about selected trials.
 
 The app is not a medical decision engine. It is a decision-support tool that extracts facts from a patient note, retrieves relevant trial chunks, checks eligibility against the trial text, and returns a structured, evidence-based summary.
 
@@ -56,7 +56,7 @@ What:
 The FastAPI route accepts a patient_case string and rejects names, phone numbers, SSNs, and email addresses.
 
 Why:
-This prevents obvious personal-identifying information from being sent into model calls or stored in session state.
+This blocks common direct identifiers before the matching workflow makes model or retrieval calls. It is a basic pattern check, not a complete de-identification system.
 
 How:
 The `PHI` regex in `backend/app/services/pipeline.py` checks for common identifiers before workflow execution.
@@ -128,11 +128,11 @@ A more probabilistic scoring model could be used, but that would be less auditab
 | BigQuery | Google Cloud data warehouse and SQL engine | Retrieval store and vector search | Stores embeddings and allows serverless `VECTOR_SEARCH()` | Requires GCP configuration and permissions |
 | Google Gen AI / Gemini | LLM service | Parsing and criteria judging | Understands free-text medical narratives and structured output | Depends on external model availability and token costs |
 | Vertex AI Embeddings | Dense embedding model | `backend/app/services/embeddings.py` | Creates semantic vectors for patient queries and trial chunks | Requires GCP and model access |
-| Google ADK | Agent orchestration library | `backend/app/agents/workflow.py` | Coordinates parsing, retrieval, and parallel eligibility evaluation | Adds another abstraction beyond simple Python function calls |
+| Python `asyncio` | Asynchronous workflow coordination | `backend/app/agents/workflow.py` | Runs parsing and retrieval without blocking and bounds concurrent trial judging | The workflow is explicit Python orchestration rather than an ADK agent graph |
 | Pydantic | Data validation and schemas | `backend/app/schemas.py` | Enforces input/output shapes and response contracts | Validation errors can need careful handling |
 | ClinicalTrials.gov API v2 | Registry data source | `backend/ingestion/fetch_trials.py` | Supplies open recruiting studies | API rate limits and field variability |
 | PMC BioC API | Publication abstracts | `backend/ingestion/fetch_pmc.py` | Adds optional publication context for trials | External API availability and rate limits |
-| Google Cloud Storage | Optional object storage | `backend/app/services/gcs_store.py` | Stores processed JSON blobs as a fallback or backup | Not required for the main runtime path |
+| Google Cloud Storage | Optional object storage | `backend/app/services/gcs_store.py`, `backend/app/services/trial_store.py` | Stores processed JSON; the runtime store prefers GCS and can fall back to local files | Not required when using local JSON files |
 | pytest | Automated tests | `backend/tests/*` | Checks retrieval, API, and ingestion logic | Not a full end-to-end cloud test suite |
 
 ---
@@ -143,85 +143,106 @@ A more probabilistic scoring model could be used, but that would be less auditab
 
 ```mermaid
 flowchart LR
-    U[User] --> F[React Frontend\nVite + Browser UI]
-    F -->|POST /api/match| B[FastAPI Backend\napp.main]
-    B --> P[Pipeline\nPHI check + workflow launcher]
-    P --> PA[PatientParserAgent]
-    PA --> LLM1[Gemini\nstructured patient extraction]
-    P --> RET[TrialRetrievalAgent]
-    RET --> Q[BigQuery VECTOR_SEARCH\ntrial_chunks table]
-    Q --> R[(Processed trial data\ntrials.json + chunks.json)]
-    RET --> C[Candidate list]
-    C --> PE[ParallelEligibilityAgent]
-    PE --> J[Eligibility judge\nGemini + quote validation]
-    J --> FR[FinalRankingAgent]
-    FR --> API[JSON MatchResponse]
-    API --> F
+    subgraph Build["Offline data preparation"]
+        CTG[ClinicalTrials.gov API] --> FT[fetch_trials.py]
+        FT --> TJ[(processed/trials.json)]
+        TJ -. optional enrichment .-> PMC[fetch_pmc.py]
+        TJ --> CK[chunker.py]
+        PMC --> CK
+        CK --> ING[ingest.py]
+        ING --> EMB_DOC[Vertex AI document embeddings]
+        EMB_DOC --> BQ[(BigQuery trial_chunks)]
+        ING --> CJ[(processed/chunks.json)]
+        ING -. optional upload .-> GCS[(Google Cloud Storage)]
+    end
 
-    subgraph GCP[Google Cloud]
-        Q
-        LLM1
-        J
+    subgraph Match["Online trial matching"]
+        USER[User] --> UI[React App.jsx]
+        UI --> APIJS[frontend/src/api.js]
+        APIJS -->|POST /api/match| ROUTE[FastAPI main.py]
+        ROUTE --> PIPE[pipeline.py\nlength + direct-identifier checks]
+        PIPE --> WF[workflow.py\nPython asyncio orchestration]
+        WF --> PARSE[patient_parser.py]
+        PARSE --> GEM_PARSE[Gemini structured profile]
+        WF --> QEMB[embeddings.py\nquery embeddings]
+        QEMB --> RET[retriever.py\nBigQuery VECTOR_SEARCH + RRF]
+        BQ --> RET
+        RET --> CAND[Deduplicated trial candidates]
+        CAND --> JUDGE[eligibility_judge.py\nbounded concurrent assessment]
+        JUDGE --> GEM_JUDGE[Gemini criterion assessment]
+        TJ --> STORE[trial_store.py\ntrial metadata + passages]
+        CJ --> STORE
+        STORE --> JUDGE
+        JUDGE --> RANK[Deterministic verdict + ranking]
+        RANK --> SCHEMA[schemas.py\nMatchResponse]
+        SCHEMA --> ROUTE
+        ROUTE --> UI
+    end
+
+    subgraph FollowUp["Follow-up chat"]
+        UI --> CHATUI[ChatPanel.jsx]
+        CHATUI -->|POST /api/trials/chat| CHATAPI[FastAPI chat route]
+        CHATAPI --> CHAT[services/chat.py]
+        CHAT --> BQ
+        CHAT -. BigQuery has no usable matches .-> CJ
+        CHAT --> GEM_CHAT[Gemini evidence-grounded answer]
+        GEM_CHAT --> CITES[Citations + answer]
+        CITES --> CHATUI
     end
 ```
 
-### Sequence diagram for a typical user request
+The matching workflow has two distinct data paths: ingestion prepares trial text and embeddings before user requests, while the API uses those indexed chunks to find and assess candidates. The chat endpoint is a separate follow-up flow scoped to trials returned by matching; it does not change the eligibility verdict.
+
+The module named `backend/app/agents/workflow.py` currently implements the workflow with Python `asyncio`. `run_adk_workflow()` is retained as a compatibility entry point, but the runtime does not construct ADK `SequentialAgent`/`ParallelAgent` objects or use separate agent state/callback modules.
+
+### Sequence diagram for a matching request
 
 ```mermaid
 sequenceDiagram
     participant User
     participant Frontend
     participant API as FastAPI /api/match
-    participant Pipeline
-    participant Parser as PatientParserAgent
-    participant Retriever as TrialRetrievalAgent
+    participant Pipeline as services/pipeline.py
+    participant Workflow as agents/workflow.py
+    participant Parser as patient_parser.py
     participant BigQuery
-    participant Judge as ParallelEligibilityAgent
-    participant Ranker as FinalRankingAgent
+    participant Judge as eligibility_judge.py
+    participant Store as trial_store.py
 
     User->>Frontend: Paste patient case
-    Frontend->>API: POST { patient_case }
-    API->>Pipeline: run(patient_case)
-    Pipeline->>Pipeline: PHI validation
-    Pipeline->>Parser: parse patient case
-    Parser->>Gemini: structured extraction
-    Gemini-->>Parser: PatientProfile
-    Pipeline->>Retriever: retrieve([search_query, case])
-    Retriever->>BigQuery: VECTOR_SEARCH on embeddings
-    BigQuery-->>Retriever: ranked candidate trial chunks
-    Retriever-->>Pipeline: candidate list
-    Pipeline->>Judge: evaluate top candidates in parallel
-    Judge->>Gemini: compare trial criteria vs patient evidence
-    Judge-->>Pipeline: criterion assessments + summary
-    Pipeline->>Ranker: bundle evaluation results
-    Ranker-->>API: MatchResponse
+    Frontend->>API: POST /api/match
+    API->>Pipeline: validate request + scan identifiers
+    Pipeline->>Workflow: run_adk_workflow(case)
+    Workflow->>Parser: parse_patient(case)
+    Parser->>Parser: Gemini structured extraction
+    Parser-->>Workflow: PatientProfile
+    Workflow->>BigQuery: embed queries + VECTOR_SEARCH
+    BigQuery-->>Workflow: candidate chunks and similarity
+    Workflow->>Store: load metadata and evidence passages
+    Workflow->>Judge: assess candidates with bounded concurrency
+    Judge->>Judge: verify quotes; compute verdict per trial
+    Judge-->>Workflow: verified criteria + verdicts
+    Workflow->>Workflow: rank by verdict, criteria, relevance
+    Workflow-->>API: MatchResponse
     API-->>Frontend: ranked matches JSON
-    Frontend-->>User: Trial cards + evidence view
+    Frontend-->>User: profile, trial cards, criteria, passages
 ```
 
-### Implemented vs planned components
-Implemented:
-- patient parsing with Gemini
-- retrieval against BigQuery embedding table
-- eligibility judging with quote verification
-- final ranking and UI
-- ingestion scripts for ClinicalTrials.gov and optional PMC publication enrichment
-
-Planned or optional:
-- automated job scheduling for periodic ingestion
-- production-grade caching and observability
-- stricter RBAC / auth for multi-user deployment
-- vector index tuning and sharding at large scale
+### Implemented components and boundaries
+- Implemented: ClinicalTrials.gov import, optional PMC enrichment, chunking, embedding ingestion, BigQuery retrieval, patient parsing, eligibility assessment, deterministic ranking, result UI, and selected-trial evidence chat.
+- Optional: GCS storage for processed JSON and a BigQuery vector index. BigQuery exact vector search does not require creating the optional index.
+- Not shown as implemented: a scheduled ingestion service, authentication/authorization, or an ADK agent graph.
 
 ---
 
-## E. Complete Folder and File Structure
+## E. Application Source and Data Structure
 
 ```text
 CLINICAL-TRIAL-RAG/
 ├── README.md
 ├── .gitignore
 ├── backend/
+│   ├── .env.example
 │   ├── requirements.txt
 │   ├── app/
 │   │   ├── __init__.py
@@ -229,22 +250,23 @@ CLINICAL-TRIAL-RAG/
 │   │   ├── main.py
 │   │   ├── schemas.py
 │   │   ├── agents/
-│   │   │   ├── callbacks.py
-│   │   │   ├── state.py
 │   │   │   └── workflow.py
 │   │   └── services/
+│   │       ├── chat.py
 │   │       ├── eligibility_judge.py
 │   │       ├── embeddings.py
 │   │       ├── gcs_store.py
 │   │       ├── patient_parser.py
 │   │       ├── pipeline.py
 │   │       ├── retriever.py
+│   │       ├── __init__.py
 │   │       └── trial_store.py
 │   ├── data/
 │   │   └── processed/
 │   │       ├── chunks.json
 │   │       └── trials.json
 │   ├── ingestion/
+│   │   ├── __init__.py
 │   │   ├── build_index.py
 │   │   ├── chunker.py
 │   │   ├── fetch_pmc.py
@@ -260,6 +282,7 @@ CLINICAL-TRIAL-RAG/
 ├── frontend/
 │   ├── index.html
 │   ├── package.json
+│   ├── package-lock.json
 │   ├── vite.config.js
 │   └── src/
 │       ├── api.js
@@ -268,17 +291,16 @@ CLINICAL-TRIAL-RAG/
 │       ├── main.jsx
 │       ├── styles.css
 │       └── components/
+│           ├── ChatPanel.jsx
 │           ├── ProfilePanel.jsx
+│           ├── TrialCard.css
 │           └── TrialCard.jsx
-└── .github/
-    └── modernize/
-        └── assessment/
-            └── engines/
-                └── facts/
-                    └── architecture-diagram.md
+└── .github/                 # Repository metadata; not part of the runtime path
 ```
 
-### File-by-file explanation
+`backend/.env` is intentionally not listed; it is a local configuration file. Copy `.env.example` to create it. `frontend/dist/` is generated build output, not application source. Supporting inventory/structure notes under `backend/` are omitted from this application-source view.
+
+### File responsibilities and how modules connect
 
 #### Root files
 - `README.md` — project overview and developer guide.
@@ -292,7 +314,7 @@ Why:
 The application needs a single place for runtime config so the same logic can run across local development and cloud environments.
 
 How:
-It uses `pydantic-settings` with `.env` support and environment alias names like `GCP_PROJECT`, `BIGQUERY_DATASET`, and `ADK_CONCURRENCY`.
+It uses `pydantic-settings` with `backend/.env` support and aliases such as `GCP_PROJECT`, `BIGQUERY_DATASET`, and `ADK_CONCURRENCY`. The latter is a legacy setting name currently used to bound concurrent eligibility checks; the workflow does not create ADK agents.
 
 Dependencies:
 - `pydantic`, `pydantic-settings`
@@ -311,12 +333,13 @@ Why:
 This is the public API layer for the frontend.
 
 How:
-It exposes `/api/health` and `/api/match`, converts exceptions to HTTP errors, and calls `pipeline.run()`.
+It exposes liveness/readiness routes plus `/api/match` and `/api/trials/chat`. It validates request/response schemas, assigns request IDs, applies CORS, and maps service errors to HTTP responses.
 
 Dependencies:
 - FastAPI
 - `app.schemas`
 - `app.services.pipeline`
+- `app.services.chat`
 - `app.services.trial_store`
 
 Connections:
@@ -337,23 +360,23 @@ Dependencies:
 
 #### `backend/app/services/pipeline.py`
 What:
-The API-facing orchestration layer before the workflow begins.
+The matching input-validation and privacy guard before the workflow begins.
 
 Why:
-It enforces privacy rules and calls the ADK workflow.
+It rejects malformed or overlong cases and common direct identifiers before model or retrieval calls.
 
 How:
-It checks for PHI and raises a `ValueError` if identifiers are found.
+It validates the 40–8000 character limit, scans for common email/SSN/phone patterns, then calls `run_adk_workflow()` in `agents/workflow.py`. The function name is retained for compatibility; the implementation is Python orchestration.
 
 #### `backend/app/services/trial_store.py`
 What:
-Loads the processed trial and chunk caches from `trials.json` and `chunks.json`.
+Loads processed trial metadata and chunk text from `trials.json` and `chunks.json`.
 
 Why:
 The matching workflow needs a fast local lookup for metadata and evidence snippets.
 
 How:
-It uses `lru_cache` and optional GCS fallback. This is a local in-memory cache for request-time access.
+It prefers configured GCS objects and falls back to the configured local processed directory. Cached accessors provide the trial index and chunk text used for result passages and chat fallback.
 
 #### `backend/app/services/embeddings.py`
 What:
@@ -363,7 +386,7 @@ Why:
 The retrieval layer needs vector representations for both patient queries and trial text chunks.
 
 How:
-It batches texts and normalizes vectors to unit length before returning them to the retrieval layer.
+It calls the Vertex AI embedding model in paced batches, validates dimensions, and normalizes vectors. Ingestion requests document embeddings; matching and chat request query embeddings.
 
 Dependencies:
 - `google.genai`
@@ -386,7 +409,7 @@ Dependencies:
 - `app.services.trial_store`
 
 Connections:
-Used by `backend/app/agents/workflow.py` through `retrieve()`.
+Used by the matching workflow and chat service through `retrieve()` and evidence retrieval.
 
 #### `backend/app/services/patient_parser.py`
 What:
@@ -415,37 +438,30 @@ Dependencies:
 
 #### `backend/app/agents/workflow.py`
 What:
-Defines the ADK workflow that coordinates the pipeline.
+Coordinates the end-to-end matching request.
 
 Why:
-The project needs a multi-step process with retrieval, judgment, and final ranking in a controlled sequence.
+The matching path needs a controlled sequence for parsing and candidate retrieval, then bounded concurrent judging and deterministic ranking.
 
 How:
-It creates a `SequentialAgent` with `PatientParserAgent`, `TrialRetrievalAgent`, `ParallelEligibilityAgent`, and `FinalRankingAgent`.
+`_run_workflow_async()` parses the case, retrieves candidates, resolves their metadata and evidence passages, judges candidates concurrently via `asyncio.gather()` and a semaphore, then sorts by verdict, criterion evidence, and relevance. `run_adk_workflow()` wraps this coroutine for the synchronous API route; despite its compatibility name, it does not create ADK agent objects.
 
 Dependencies:
-- `google.adk`
+- Python `asyncio`
 - `app.services.patient_parser`
 - `app.services.retriever`
 - `app.services.eligibility_judge`
 - `app.services.trial_store`
 
-#### `backend/app/agents/callbacks.py`
+#### `backend/app/services/chat.py`
 What:
-Privacy and observability guardrails for ADK agent execution.
+Retrieves evidence and answers follow-up questions about selected trials.
 
 Why:
-The project wants a minimal privacy check before agent logic and some logging around execution timing.
+Answers should be grounded in trial passages rather than unsupported model recall.
 
 How:
-It raises an error if common PHI patterns are detected, and logs basic agent metadata.
-
-#### `backend/app/agents/state.py`
-What:
-Stores standardized names for session state keys.
-
-Why:
-This keeps state management consistent across agents.
+It validates the question and NCT IDs, retrieves question-relevant chunks from BigQuery for the selected trials, falls back to local processed chunks when needed, and asks Gemini to answer from those passages. It returns citation metadata and does not determine trial eligibility.
 
 #### `backend/ingestion/fetch_trials.py`
 What:
@@ -455,7 +471,7 @@ Why:
 No local data is committed as a full registry; this script builds the dataset needed for matching.
 
 How:
-It queries the ClinicalTrials.gov API v2 and flattens fields such as eligibility and sponsor details.
+It queries ClinicalTrials.gov API v2 for recruiting studies in the configured therapeutic areas, flattens trial metadata and eligibility text, and writes `backend/data/processed/trials.json`.
 
 #### `backend/ingestion/fetch_pmc.py`
 What:
@@ -463,6 +479,9 @@ Uses PubMed or PMC identifiers to fetch abstracts from the PMC BioC API.
 
 Why:
 Optional publication enrichment improves trial context, though it is not required for the runtime retrieval path.
+
+How:
+When run after fetching trial data, it follows available PubMed IDs to PMC BioC abstracts and saves the enrichment back into `trials.json`.
 
 #### `backend/ingestion/chunker.py`
 What:
@@ -479,7 +498,7 @@ Why:
 This is the main ingestion pipeline for local or batch operations.
 
 How:
-It reads `trials.json`, chunks each trial, calls `embed()`, and writes `chunk_id`, `nct_id`, `chunk_text`, and `embedding` to the BigQuery table.
+It reads `trials.json`, chunks each trial, skips existing chunk IDs unless refresh is requested, generates document embeddings, validates records, writes the BigQuery table, and refreshes local `chunks.json`. If configured, it also uploads processed JSON to GCS.
 
 #### `backend/ingestion/build_index.py`
 What:
@@ -506,6 +525,9 @@ Tests for ingestion validation, retrieval logic, and endpoint compatibility.
 Why:
 These are the main guardrails for behavior and regressions.
 
+#### `backend/.env.example` and `backend/requirements.txt`
+The example file documents local configuration without credentials. The requirements file declares backend API, Google Cloud/model clients, and test dependencies.
+
 #### `frontend/src/App.jsx`
 What:
 Main React application page and layout.
@@ -514,7 +536,7 @@ Why:
 This is the user-facing experience for entering a patient case and viewing trial results.
 
 How:
-It shows a textarea, loading steps, and trial tabs.
+It submits the patient case, handles loading/error/empty states, and renders the profile and ranked trial results. It also opens follow-up chat for the current results.
 
 #### `frontend/src/api.js`
 What:
@@ -522,6 +544,15 @@ Wrapper around the backend API calls.
 
 Why:
 The frontend should not directly know the networking details for each request.
+
+How:
+`matchPatient()` sends `POST /api/match`; Vite proxies `/api` requests to the local FastAPI server during development.
+
+#### `frontend/src/main.jsx`, `frontend/src/config.js`, and `frontend/vite.config.js`
+`main.jsx` mounts the React app and global styles. `config.js` contains the optional background image URL. `vite.config.js` configures the development server and its `/api` proxy to FastAPI.
+
+#### `frontend/src/components/ChatPanel.jsx`
+Submits selected trial IDs, the current case context, and follow-up questions to `POST /api/trials/chat`; it renders answer text, citations, and request errors.
 
 #### `frontend/src/components/TrialCard.jsx`
 What:
@@ -537,90 +568,47 @@ Shows the structured patient profile extracted by the backend.
 Why:
 This lets the user validate the AI's interpretation of their case.
 
+`frontend/src/styles.css`, `frontend/src/components/TrialCard.css`, and `frontend/index.html` provide the UI styling and browser document root.
+
 ---
 
 ## F. End-to-End Data Flow
 
-The actual flow in this repo is as follows:
+### A. Offline trial data pipeline
+1. `fetch_trials.py` requests recruiting studies from ClinicalTrials.gov API v2, normalizes their metadata and eligibility criteria, and writes `backend/data/processed/trials.json`.
+2. Optionally, `fetch_pmc.py` enriches those trial records with abstracts found through PubMed/PMC references.
+3. `chunker.py` turns each record into an overview plus inclusion, exclusion, and available publication chunks. Each chunk has a stable ID, NCT ID, type, and text.
+4. `ingest.py` creates chunks, skips chunk IDs already in BigQuery unless a refresh is requested, generates document embeddings, validates vectors and metadata, and writes records to the configured BigQuery `trial_chunks` table.
+5. The same ingestion job writes `backend/data/processed/chunks.json` for runtime passage lookup and optionally uploads the processed JSON files to GCS.
 
-1. Data ingestion begins in `backend/ingestion/fetch_trials.py`.
-   - Input: ClinicalTrials.gov API responses.
-   - Process: flatten study metadata and eligibility text.
-   - Output: a list of trial records saved in `backend/data/processed/trials.json`.
-   - Failure mode: the script raises an HTTP error if the API request fails or a study is malformed.
+`build_index.py` initializes the BigQuery dataset/table and can optionally create a vector index. The SQL scripts provide manual initialization and verification alternatives.
 
-2. Optional publication lookup occurs in `backend/ingestion/fetch_pmc.py`.
-   - Input: PubMed/PMC references in the trial records.
-   - Process: map PMIDs to PMC IDs and fetch abstract text.
-   - Output: `publications` data attached to relevant trial objects.
-   - Failure mode: the script simply skips records when no PMC result is returned.
+### B. Trial-matching request
+1. The user enters a case in `frontend/src/App.jsx`. `frontend/src/api.js` sends `POST /api/match`; the Vite development server proxies `/api` to FastAPI.
+2. `backend/app/main.py` validates the request with `MatchRequest`, assigns request metadata, and calls `services/pipeline.py`.
+3. `pipeline.run()` enforces the 40–8000 character limit and rejects common direct identifiers (email, US SSN, and phone patterns) before calling any model or retrieval service. This is a basic guardrail, not comprehensive de-identification.
+4. `agents/workflow.py` runs `_run_workflow_async()`. `patient_parser.py` asks Gemini for a structured `PatientProfile`; the workflow then sends the profile's search query and a case excerpt to `retriever.py`.
+5. `retriever.py` embeds the search strings using `embeddings.py`, runs parameterized BigQuery `VECTOR_SEARCH()` queries, and fuses duplicate trial results using Reciprocal Rank Fusion (RRF).
+6. The workflow resolves candidate IDs against `trial_store.py`, which loads processed records from configured GCS when available and otherwise uses local processed JSON. It assesses the top configured candidates concurrently, with concurrency limited by the configured workflow setting.
+7. For each candidate, `eligibility_judge.py` asks Gemini to assess trial criteria against the patient case. It checks generated trial and patient quotes against the supplied text, discards unverifiable criterion claims, and returns criterion-level impacts.
+8. The workflow computes a deterministic verdict for each trial, orders results by verdict, criterion evidence, then retrieval similarity, and returns a validated `MatchResponse`. `main.py` maps validation and service failures to HTTP responses.
+9. `App.jsx`, `ProfilePanel.jsx`, and `TrialCard.jsx` render the profile, trial cards, verdicts, criteria, and retrieved passages. An empty candidate set is returned as a valid response with no matches.
 
-3. The trial record is chunked in `backend/ingestion/chunker.py`.
-   - Input: one trial object.
-   - Process: split it into overview, inclusion, exclusion, and publication chunks.
-   - Output: chunk objects such as `NCT123::inclusion::0`.
-   - Failure mode: a trial with missing eligibility text may produce a minimal record or no valid chunk.
+`run_adk_workflow()` is the compatibility name of the workflow entry point. It wraps Python `asyncio`; candidates are judged concurrently using a semaphore, not by ADK agent classes. The request's patient case is passed through the workflow for that request and is not persisted as a server-side chat session.
 
-4. `backend/ingestion/ingest.py` writes the chunk embeddings to BigQuery.
-   - Input: `trials.json` and chunk texts.
-   - Process: batch embedding generation, validation, duplicate filtering, and BigQuery insert.
-   - Output: rows in the `clinical_trials.trial_chunks` table.
-   - Failure mode: validation rejects bad embeddings, and BigQuery permission errors are logged.
-
-5. A user sends a patient case to the frontend.
-   - Input: free-text narrative in the browser.
-   - Process: the React app calls `matchPatient()` in `frontend/src/api.js`.
-   - Output: a JSON payload with `patient_case` to the backend.
-   - Failure mode: the frontend surfaces any HTTP error detail returned by the backend.
-
-6. The backend receives the request in `backend/app/main.py`.
-   - Input: `MatchRequest` with `patient_case`.
-   - Process: it calls `pipeline.run(req.patient_case)`.
-   - Output: a `MatchResponse` object.
-   - Failure mode: the app returns 400 for validation problems, 503 for permission issues, and 500 for unexpected failures.
-
-7. `pipeline.run()` checks for PHI.
-   - Input: raw patient note.
-   - Process: regex scan for SSN, email, or phone patterns.
-   - Output: workflow starts or `ValueError` is raised.
-   - Failure mode: the API returns a 400 response.
-
-8. The ADK workflow parses the patient case.
-   - Input: original patient case.
-   - Process: `parse_patient()` extracts `PatientProfile` with age, sex, conditions, therapies, findings, and `search_query`.
-   - Output: structured profile stored in session state.
-   - Failure mode: if the model fails or returns no valid JSON, the workflow can still continue with the fallback logic defined in the judge.
-
-9. Retrieval runs against BigQuery.
-   - Input: `search_query` and a short case slice.
-   - Process: `retrieve()` embeds queries and executes `VECTOR_SEARCH()`.
-   - Output: a list of `Candidate` objects with `nct_id`, `rrf`, `best_sim`, and evidence chunk IDs.
-   - Failure mode: `RuntimeError` for bad BigQuery resources, `PermissionError` for IAM issues.
-
-10. The judge evaluates each candidate.
-   - Input: the patient case, the extracted profile, and a trial record.
-   - Process: Gemini compares the trial's criteria to the patient evidence and returns criterion-level assessments.
-   - Output: `CriterionResult[]`, summary, and `dropped_unverified` count.
-   - Failure mode: the project logs warnings and drops invalid quote-based criteria that do not appear verbatim in source text.
-
-11. Final ranking produces the response.
-   - Input: all criterion results for the candidate set.
-   - Process: `compute_verdict()` decides ELIGIBLE / POSSIBLY_ELIGIBLE / EXCLUDED; top results are selected and sorted.
-   - Output: `MatchResponse` with `patient_profile`, `matches`, `disclaimer`, and `latency_seconds`.
-   - Failure mode: a missing result causes the trial to be skipped from the final ranking.
-
-12. The frontend renders the final output.
-   - Input: `MatchResponse` JSON.
-   - Process: React displays patient profile, verdicts, evidence, and passages.
-   - Output: UI with tabs, criteria, and citations.
-   - Failure mode: no results show an empty state panel until the user submits a valid case.
+### C. Selected-trial follow-up chat
+1. `ChatPanel.jsx` sends `POST /api/trials/chat` with a question, the currently selected trial IDs, and optional patient-case context.
+2. `main.py` validates that the selected IDs exist in the processed trial store and passes the request to `services/chat.py`.
+3. The chat service loads chunks only for the selected trials from BigQuery and ranks them against the question. When BigQuery has no usable passages or retrieval fails, it ranks local processed chunks lexically.
+4. Gemini receives the question and retrieved trial passages; the response includes citations pointing to ClinicalTrials.gov records. If no usable evidence is found, the service returns an explicit no-evidence answer rather than inventing citations.
+5. `ChatPanel.jsx` displays the answer and citations. The chat route is separate from matching and does not revise the eligibility verdict.
 
 ---
 
 ## G. Core Logic Explained
 
 ### 1. `pipeline.run()`
-This function is the API-level entry point. It rejects possible personal identifiers before the workflow runs, then calls the Google ADK agent workflow. This is the first defensive layer against unsafe or personally identifying inputs.
+This function is the matching API's input guard. It checks length limits and common direct-identifier patterns before calling `run_adk_workflow()`. The identifier scan is a basic safeguard, not a complete de-identification system.
 
 Important behaviors:
 - It checks to prevent SSN, email, and phone patterns.
@@ -656,18 +644,18 @@ This is the deterministic decision logic:
 
 This ensures that the LLM is a criterion-level auditor, not the final decision-maker.
 
-### 5. Google ADK workflow
-The app uses `SequentialAgent` and `ParallelAgent` to orchestrate a workflow that:
+### 5. Python workflow orchestration
+`backend/app/agents/workflow.py` coordinates a workflow that:
 
 1. parses the patient profile,
 2. retrieves candidate trials,
-3. evaluates trials concurrently,
+3. evaluates trials concurrently with a configured semaphore limit,
 4. ranks the final result set.
 
-This is an explicit multi-step architecture that mirrors a classic agent pipeline rather than a single monolithic function.
+The `run_adk_workflow()` name is retained for compatibility, but the implementation uses Python `asyncio` and direct service calls rather than ADK `SequentialAgent` or `ParallelAgent` classes.
 
 ### 6. Local trial cache and GCS fallback
-The code keeps `trials.json` and `chunks.json` in `backend/data/processed/` and can optionally load them from GCS if `settings.gcs_bucket` is set. This makes local debugging easier and allows the service to operate even when the cloud backend is not configured.
+The code keeps `trials.json` and `chunks.json` in `backend/data/processed/` and can load them from the configured GCS bucket, falling back to local files when GCS objects are unavailable. BigQuery and Vertex AI are still required for cloud vector retrieval and model operations.
 
 ---
 
@@ -678,7 +666,7 @@ Method: `GET`
 Endpoint: `/api/health`
 
 Purpose:
-Check whether the service is responding and whether the local trial index is loaded.
+Check whether the API process is responding. Use `/api/ready` to verify that processed trial metadata is available.
 
 Example request:
 ```http
@@ -766,6 +754,55 @@ Possible status codes:
 Source:
 `backend/app/main.py` and `backend/app/schemas.py`
 
+### Readiness endpoint
+**Method:** `GET`
+
+**Endpoint:** `/api/ready`
+
+Unlike `/api/health`, this checks that processed trial metadata can be loaded. It returns `503 Service Unavailable` if no usable trial data is available.
+
+### Selected-trial chat endpoint
+**Method:** `POST`
+
+**Endpoint:** `/api/trials/chat`
+
+Purpose:
+Answer a follow-up question using passages retrieved from the selected trials, returning citations to the source trial records.
+
+Request body:
+```json
+{
+  "question": "What information is still missing for the age requirement?",
+  "trial_ids": ["NCT12345678"],
+  "patient_case": "Optional patient-case context",
+  "session_id": "optional-client-session-id"
+}
+```
+
+`trial_ids` must contain known ClinicalTrials.gov IDs (up to 10 per request). `patient_case` and `session_id` are optional; `session_id` is echoed in the response but is not used for server-side persistence. Chat evidence retrieval is scoped to the selected trials.
+
+Response shape:
+```json
+{
+  "answer": "The available trial passages do not specify this requirement.",
+  "citations": [
+    {
+      "nct_id": "NCT12345678",
+      "trial_title": "Trial title",
+      "section": "INCLUSION",
+      "excerpt": "Eligibility passage excerpt",
+      "url": "https://clinicaltrials.gov/study/NCT12345678"
+    }
+  ],
+  "missing_info": null,
+  "session_id": "optional-client-session-id"
+}
+```
+
+If no usable trial evidence is retrieved, the service returns an explicit no-evidence answer and an empty citations list. Invalid questions or trial IDs return `400`; request-schema errors return `422`; cloud access failures may return `503`.
+
+Source: `backend/app/main.py`, `backend/app/services/chat.py`, and `backend/app/schemas.py`.
+
 ---
 
 ## I. Configuration and Environment Variables
@@ -787,9 +824,9 @@ The main settings live in `backend/app/config.py`. These values are read from `b
 | `TOP_K_CHUNKS` / `top_k_chunks` | `20` | Optional | Number of chunk hits per query |
 | `CANDIDATES_TO_JUDGE` / `candidates_to_judge` | `6` | Optional | Max candidates sent to the judge |
 | `FINAL_RESULTS` / `final_results` | `3` | Optional | Final number of ranked matches |
-| `ADK_CONCURRENCY` / `adk_concurrency` | `6` | Optional | Parallel trial evaluation batch size |
-| `ADK_TIMEOUT_SECONDS` / `adk_timeout_seconds` | `60.0` | Optional | Timeout for the workflow and sub-agents |
-| `ADK_APP_NAME` / `adk_app_name` | `clinical_trial_matcher` | Optional | ADK session app name |
+| `ADK_CONCURRENCY` / `adk_concurrency` | `6` | Optional | Maximum concurrent eligibility checks (legacy setting name) |
+| `ADK_TIMEOUT_SECONDS` / `adk_timeout_seconds` | `60.0` | Optional | Reserved configuration; no workflow timeout is currently applied |
+| `ADK_APP_NAME` / `adk_app_name` | `clinical_trial_matcher` | Optional | Reserved configuration; no ADK application/session is currently created |
 
 Example `.env` file:
 ```env
@@ -807,8 +844,6 @@ TOP_K_CHUNKS=20
 CANDIDATES_TO_JUDGE=6
 FINAL_RESULTS=3
 ADK_CONCURRENCY=6
-ADK_TIMEOUT_SECONDS=60
-ADK_APP_NAME=clinical_trial_matcher
 ```
 
 Important note:
@@ -943,7 +978,7 @@ Optional:
 | Design choice | Current approach | Why it fits this project | Benefits | Limitations | Alternative |
 |---|---|---|---|---|---|
 | Retrieval engine | BigQuery `VECTOR_SEARCH()` | Keeps embeddings and metadata in one managed system | Simple operational model, no custom vector service | Requires GCP + BigQuery permissions | Vertex AI Vector Search or a separate vector DB |
-| LLM orchestration | Google ADK sequential/parallel agents | Good separation of parsing, retrieval, and judging | Clear execution flow and easier debugging | More moving pieces than a single function | A strict Python pipeline without agent abstractions |
+| Workflow orchestration | Python `asyncio` with bounded concurrency | Keeps the sequence explicit and limits concurrent eligibility checks | Direct service calls and deterministic flow | Concurrency is managed in application code | An ADK agent graph or a task queue |
 | Eligibility logic | Gemini + quote validation + deterministic verdict | Makes results more explainable and auditable | Users can see evidence-backed decisions | Still depends on LLM output quality | Pure rules-based matching or keyword heuristics |
 | Data storage | `trials.json` + `chunks.json` + BigQuery table | Local debugging plus cloud search | Simple dev cycle and production search | Duplicate storage of some data | Single source-of-truth database only |
 | Frontend architecture | React with direct fetch to `/api/match` | Minimal UI complexity and minimal dependencies | Fast to build and easy to inspect | Less structured than a larger app framework | Next.js or another full-stack framework |
@@ -994,7 +1029,8 @@ Optional:
 
 ### Existing protections
 - PHI regex rejects obvious identifiers before workflow execution.
-- Patient narratives are kept in session state only during a request; the app does not persist them to a database.
+- The API does not persist patient narratives in a database or server-side session. Matching sends case text to the configured model service; follow-up chat may also send its optional case context to that service.
+- The matching route applies the common-identifier scan; the separate chat route validates selected trial IDs and lengths but does not apply that patient-case identifier scan. Avoid sending direct identifiers through either route.
 - Structured output schemas limit model output to expected fields.
 - Quote verification prevents some hallucinated trial statements from passing through to the UI.
 - The API converts low-level exceptions into safe HTTP responses.
@@ -1090,7 +1126,7 @@ pytest -q
 - Pipeline orchestration: `backend/app/services/pipeline.py`
 - Retrieval logic: `backend/app/services/retriever.py`
 - Eligibility judge: `backend/app/services/eligibility_judge.py`
-- ADK workflow: `backend/app/agents/workflow.py`
+- Matching workflow: `backend/app/agents/workflow.py` (Python `asyncio`; compatibility entry point named `run_adk_workflow`)
 - Frontend entry: `frontend/src/App.jsx`
 
 ### Important directories
@@ -1126,4 +1162,3 @@ pytest -q
 
 ## Final note
 This repository is a research-oriented clinical trial matching system with a clear separation between data ingestion, semantic retrieval, evidence-based eligibility judge logic, and presentation. The code reflects a practical architecture: secure input handling, BigQuery-based vector search, Gemini for structured extraction and assessment, and a frontend designed to show audit-friendly evidence rather than just a single ranked result.
-
