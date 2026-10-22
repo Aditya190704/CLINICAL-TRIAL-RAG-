@@ -58,7 +58,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for Mermaid flowcharts, sequence, data, a
 | Frontend | React 18, Vite |
 | API | Python, FastAPI, Pydantic |
 | Model orchestration | Google ADK `2.11.0`, Google Gen AI |
-| Language model | Gemini 3.8 Flash via Gemini Enterprise Agent Platform |
+| Language model | Gemini 2.5 Flash via Gemini Enterprise Agent Platform |
 | Embeddings and retrieval | Vertex AI embeddings, BigQuery `VECTOR_SEARCH` |
 | Data sources | ClinicalTrials.gov API v2; optional PMC BioC API |
 | Optional object storage | Google Cloud Storage |
@@ -128,7 +128,7 @@ The backend loads `backend/.env` and process environment variables. Never commit
 | `BIGQUERY_LOCATION` | `us-central1` | Optional explicit BigQuery job location. |
 | `EMBEDDING_MODEL` | `text-embedding-005` | Embedding model name. |
 | `EMBEDDING_DIM` | `768` | Expected vector dimension. |
-| `GEMINI_MODEL` | `gemini-3.8-flash` | ADK model used for extraction, criteria assessment, and chat. |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | ADK model used for extraction, criteria assessment, and chat. |
 | `CANDIDATES_TO_RETRIEVE` | `20` | BigQuery retrieval chunk limit. |
 | `CANDIDATES_TO_JUDGE` | `6` | Maximum candidates assessed per matching request. |
 | `TOP_K_RESULTS` | `3` | Maximum matches returned. |

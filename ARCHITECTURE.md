@@ -163,7 +163,7 @@ flowchart LR
     BROWSER[Browser] -->|HTTPS| FRONTEND[Frontend host]
     FRONTEND -->|API request| API[FastAPI host]
     API -->|Vector search| BQ[(BigQuery)]
-    API -->|Gemini 3.8 Flash requests| VERTEX[Gemini Enterprise Agent Platform]
+    API -->|Gemini model requests| VERTEX[Gemini Enterprise Agent Platform]
     INGEST[Ingestion job] -->|Write chunks| BQ
     INGEST -. Optional files .-> GCS[(Google Cloud Storage)]
 ```
