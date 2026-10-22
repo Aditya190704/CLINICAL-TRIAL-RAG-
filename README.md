@@ -11,6 +11,28 @@ Clinical Trial RAG is a patient-to-trial matching application that helps a clini
 
 The app is not a medical decision engine. It is a decision-support tool that extracts facts from a patient note, retrieves relevant trial chunks, checks eligibility against the trial text, and returns a structured, evidence-based summary.
 
+## Table of Contents
+
+- [Project Overview](#a-project-overview)
+- [What, Why, and How](#b-what-why-and-how)
+- [Technology Stack](#c-technology-stack)
+- [Architecture](#d-complete-project-architecture)
+- [Project Structure](#e-application-source-and-data-structure)
+- [End-to-End Data Flow](#f-end-to-end-data-flow)
+- [Core Logic](#g-core-logic-explained)
+- [API Documentation](#h-api-documentation)
+- [Configuration](#i-configuration-and-environment-variables)
+- [Installation and Setup](#j-installation-and-setup)
+- [Design Trade-Offs](#k-alternatives-and-design-trade-offs)
+- [Troubleshooting](#l-error-handling-and-troubleshooting)
+- [Security and Privacy](#m-security-privacy-and-reliability)
+- [Testing](#n-testing-and-code-quality)
+- [Limitations and Future Work](#o-limitations-and-future-improvements)
+- [Deployment](#deployment)
+- [Contributing](#contributing)
+- [License](#license)
+- [Quick Reference](#p-quick-reference)
+
 ---
 
 ## A. Project Overview
@@ -22,7 +44,7 @@ This repository builds a clinical-trial matching system for anonymized patient c
 2. finds relevant trials from the registry,
 3. compares the patient to trial eligibility text,
 4. verifies the model's evidence against the original text,
-5. returns a ranked list of trials with verdicts such as ELIGIBLE, POSSIBLY_ELIGIBLE, or EXCLUDED.
+5. returns ranked trials labeled POSSIBLY_ELIGIBLE or EXCLUDED for clinician review.
 
 ### Why it matters
 Clinical studies often have strict inclusion and exclusion criteria. A clinician may need to search across many open trials and compare patient facts to those criteria. Doing this manually is slow and error-prone. This project reduces that work by pulling candidate trials and showing the exact trial rule and patient evidence behind each judgment.
@@ -73,6 +95,7 @@ The system needs a canonical representation of age, sex, condition, prior therap
 
 How:
 `backend/app/services/patient_parser.py` uses `genai.Client(...).models.generate_content()` with a JSON response schema.
+After generation, the application drops extracted facts that are not explicitly supported by the case, retains age and sex only when stated, and restricts generated search terms to words present in the case.
 
 Alternative:
 A rules-based parser could extract limited facts, but this project chooses an LLM to capture more natural language details with a schema.
@@ -105,7 +128,7 @@ A heuristics-only evaluator would be faster and cheaper, but it would miss nuanc
 
 ### 5. Final verdict and ranking
 What:
-The final verdict is deterministic: any BLOCKS criterion makes the trial EXCLUDED; otherwise unknowns lead to POSSIBLY_ELIGIBLE; otherwise ELIGIBLE.
+The final verdict is deliberately conservative: a BLOCKS criterion marks a trial EXCLUDED for review; all other assessments remain POSSIBLY_ELIGIBLE. The model assesses a limited, potentially incomplete set of criteria, so passing only the assessed criteria cannot establish eligibility.
 
 Why:
 This makes the result explainable and consistent instead of letting the LLM decide the final label.
@@ -639,10 +662,9 @@ This is one of the project's biggest design decisions: evidence is verified befo
 This is the deterministic decision logic:
 
 - any BLOCKS result => EXCLUDED
-- otherwise, if there are UNKNOWN results or no criteria => POSSIBLY_ELIGIBLE
-- otherwise => ELIGIBLE
+- otherwise => POSSIBLY_ELIGIBLE
 
-This ensures that the LLM is a criterion-level auditor, not the final decision-maker.
+The judge may assess a selective set of at most 30 criteria, so the workflow does not label a trial ELIGIBLE based only on criteria the model happened to assess. User-facing summaries are generated from the deterministic verdict and remind users that the review may be incomplete.
 
 ### 5. Python workflow orchestration
 `backend/app/agents/workflow.py` coordinates a workflow that:
@@ -653,6 +675,7 @@ This ensures that the LLM is a criterion-level auditor, not the final decision-m
 4. ranks the final result set.
 
 The `run_adk_workflow()` name is retained for compatibility, but the implementation uses Python `asyncio` and direct service calls rather than ADK `SequentialAgent` or `ParallelAgent` classes.
+Eligibility model requests also use a process-wide concurrency limit so multiple simultaneous API requests do not multiply the configured number of judge calls.
 
 ### 6. Local trial cache and GCS fallback
 The code keeps `trials.json` and `chunks.json` in `backend/data/processed/` and can load them from the configured GCS bucket, falling back to local files when GCS objects are unavailable. BigQuery and Vertex AI are still required for cloud vector retrieval and model operations.
@@ -732,8 +755,8 @@ Example response:
       "sponsor": "Example Sponsor",
       "locations": ["Boston, MA"],
       "relevance_score": 0.91,
-      "verdict": "ELIGIBLE",
-      "summary": "The assessed trial criteria are consistent with the provided case.",
+      "verdict": "POSSIBLY_ELIGIBLE",
+      "summary": "Some assessed criteria may be supported, but this review may be incomplete and does not establish eligibility. A qualified clinical team must review all official criteria.",
       "criteria": [],
       "dropped_unverified": 0,
       "passages": []
@@ -825,7 +848,7 @@ The main settings live in `backend/app/config.py`. These values are read from `b
 | `CANDIDATES_TO_JUDGE` / `candidates_to_judge` | `6` | Optional | Max candidates sent to the judge |
 | `FINAL_RESULTS` / `final_results` | `3` | Optional | Final number of ranked matches |
 | `ADK_CONCURRENCY` / `adk_concurrency` | `6` | Optional | Maximum concurrent eligibility checks (legacy setting name) |
-| `ADK_TIMEOUT_SECONDS` / `adk_timeout_seconds` | `60.0` | Optional | Reserved configuration; no workflow timeout is currently applied |
+| `ADK_TIMEOUT_SECONDS` / `adk_timeout_seconds` | `60.0` | Optional | Per-request HTTP timeout for Google Gen AI model and embedding calls (legacy setting name; not an overall workflow deadline) |
 | `ADK_APP_NAME` / `adk_app_name` | `clinical_trial_matcher` | Optional | Reserved configuration; no ADK application/session is currently created |
 
 Example `.env` file:
@@ -1162,3 +1185,29 @@ pytest -q
 
 ## Final note
 This repository is a research-oriented clinical trial matching system with a clear separation between data ingestion, semantic retrieval, evidence-based eligibility judge logic, and presentation. The code reflects a practical architecture: secure input handling, BigQuery-based vector search, Gemini for structured extraction and assessment, and a frontend designed to show audit-friendly evidence rather than just a single ranked result.
+
+## Deployment
+
+The repository does not include a production hosting configuration. Choose a frontend host and an ASGI-capable backend host, then configure Google Cloud credentials, backend environment variables, and the allowed frontend origins for that environment. Add authentication and authorization before exposing the API to multiple users.
+
+Build the frontend from `frontend/`:
+
+```bash
+npm run build
+```
+
+Run the API from `backend/` with a production ASGI server configuration supplied by your hosting platform:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port <PORT>
+```
+
+Set `CORS_ORIGINS` to the deployed frontend origin. Do not commit credentials or production secrets to the repository.
+
+## Contributing
+
+Create a focused branch, explain behavior or configuration changes in the pull request, and run the relevant backend tests and frontend build before submitting. Keep patient data and credentials out of commits, logs, and examples.
+
+## License
+
+`<LICENSE>` — add the project’s license and license file before distribution.

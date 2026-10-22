@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from typing import Any
 
@@ -7,6 +8,8 @@ from google.genai import types
 
 from app.config import settings
 from app.schemas import CriterionResult, JudgeOutput, PatientProfile
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -19,6 +22,9 @@ def create_judge_client():
         vertexai=True,
         project=settings.gcp_project,
         location=settings.gcp_location,
+        http_options=types.HttpOptions(
+            timeout=max(1, round(settings.adk_timeout_seconds * 1000))
+        ),
     )
 
 
@@ -153,11 +159,14 @@ def _parse_judge_output(resp: Any) -> JudgeOutput | None:
                 return JudgeOutput.model_validate(parsed)
             return JudgeOutput.parse_obj(parsed)
         except Exception as exc:
-            print(f"[WARN] Could not validate resp.parsed: {exc}")
+            logger.warning(
+                "Could not validate parsed eligibility response (%s).",
+                type(exc).__name__,
+            )
 
     raw_text = getattr(resp, "text", None)
     if not raw_text or not raw_text.strip():
-        print("[WARN] Gemini response text was empty.")
+        logger.warning("Gemini eligibility response text was empty.")
         return None
 
     cleaned = raw_text.strip()
@@ -170,7 +179,10 @@ def _parse_judge_output(resp: Any) -> JudgeOutput | None:
             return JudgeOutput.model_validate_json(cleaned)
         return JudgeOutput.parse_raw(cleaned)
     except Exception as exc:
-        print(f"[WARN] Pydantic JSON parsing failed: {exc}")
+        logger.warning(
+            "Could not parse eligibility response as structured JSON (%s).",
+            type(exc).__name__,
+        )
 
     try:
         payload = json.loads(cleaned)
@@ -178,8 +190,10 @@ def _parse_judge_output(resp: Any) -> JudgeOutput | None:
             return JudgeOutput.model_validate(payload)
         return JudgeOutput.parse_obj(payload)
     except Exception as exc:
-        print(f"[WARN] JSON parsing/validation failed: {exc}")
-        print(f"[WARN] Raw Gemini response (first 2000 chars): {cleaned[:2000]}")
+        logger.warning(
+            "Could not validate eligibility response JSON (%s).",
+            type(exc).__name__,
+        )
         return None
 
 
@@ -294,9 +308,25 @@ def judge(
             ),
         )
     except Exception as exc:
-        print(f"[ERROR] Gemini request failed for {nct_id}: {exc}")
+        logger.error(
+            "Gemini eligibility request failed for trial %s (%s).",
+            nct_id,
+            type(exc).__name__,
+        )
         return (
-            [],
+            _age_check(profile, trial)
+            + [
+                CriterionResult(
+                    source="STRUCTURED",
+                    criterion_type="INCLUSION",
+                    criterion_quote="Eligibility assessment unavailable",
+                    impact="UNKNOWN",
+                    explanation=(
+                        "The eligibility assessment could not be completed. "
+                        "Manual review is required."
+                    ),
+                )
+            ],
             "Eligibility assessment failed because the Gemini request could not "
             "be completed. Manual review is required.",
             0,
@@ -306,12 +336,28 @@ def judge(
             try:
                 client.close()
             except Exception as close_exc:
-                print(f"[WARN] Gemini client cleanup failed: {close_exc}")
+                logger.warning(
+                    "Gemini client cleanup failed for trial %s (%s).",
+                    nct_id,
+                    type(close_exc).__name__,
+                )
 
     # Important: resp.parsed can be None even when resp.text contains valid JSON.
     out = _parse_judge_output(resp)
     if out is None:
         fallback = _age_check(profile, trial)
+        fallback.append(
+            CriterionResult(
+                source="STRUCTURED",
+                criterion_type="INCLUSION",
+                criterion_quote="Eligibility assessment unavailable",
+                impact="UNKNOWN",
+                explanation=(
+                    "The eligibility assessment could not be verified. "
+                    "Manual review is required."
+                ),
+            )
+        )
         return (
             fallback,
             "Eligibility could not be fully assessed because the model did not "
@@ -331,14 +377,17 @@ def judge(
         # A criterion must have a real quote from the supplied trial criteria.
         if not criterion_quote:
             dropped += 1
-            print(f"[WARN] Dropped criterion with empty trial quote for {nct_id}")
+            logger.warning(
+                "Dropped eligibility criterion with an empty trial quote for %s.",
+                nct_id,
+            )
             continue
 
         if _norm(criterion_quote) not in elig_n:
             dropped += 1
-            print(
-                f"[WARN] Dropped hallucinated/altered criterion for {nct_id}: "
-                f"{criterion_quote}"
+            logger.warning(
+                "Dropped unverified eligibility criterion quote for %s.",
+                nct_id,
             )
             continue
 
@@ -356,9 +405,9 @@ def judge(
                 not patient_evidence
                 or _norm(patient_evidence) not in case_n
             ):
-                print(
-                    f"[WARN] Invalid patient evidence for criterion: "
-                    f"{criterion_quote}"
+                logger.warning(
+                    "Eligibility criterion had unverified patient evidence for %s.",
+                    nct_id,
                 )
                 impact = "UNKNOWN"
                 patient_evidence = ""
@@ -366,9 +415,9 @@ def judge(
         criterion_type = c.criterion_type
         if criterion_type not in {"INCLUSION", "EXCLUSION"}:
             dropped += 1
-            print(
-                f"[WARN] Dropped criterion with invalid criterion_type for "
-                f"{nct_id}: {criterion_type}"
+            logger.warning(
+                "Dropped eligibility criterion with invalid type for %s.",
+                nct_id,
             )
             continue
 
@@ -403,7 +452,10 @@ def compute_verdict(criteria: list[CriterionResult]) -> str:
     Rules:
     - Any BLOCKS criterion -> EXCLUDED
     - Otherwise, any UNKNOWN criterion or no criteria -> POSSIBLY_ELIGIBLE
-    - Otherwise -> ELIGIBLE
+    - Otherwise -> POSSIBLY_ELIGIBLE
+
+    Assessments are selective and may omit unreported or unassessed criteria,
+    so passing the assessed criteria alone cannot establish trial eligibility.
     """
     if any(c.impact == "BLOCKS" for c in criteria):
         return "EXCLUDED"
@@ -411,4 +463,4 @@ def compute_verdict(criteria: list[CriterionResult]) -> str:
     if any(c.impact == "UNKNOWN" for c in criteria) or not criteria:
         return "POSSIBLY_ELIGIBLE"
 
-    return "ELIGIBLE"
+    return "POSSIBLY_ELIGIBLE"

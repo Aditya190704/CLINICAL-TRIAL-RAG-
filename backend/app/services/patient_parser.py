@@ -8,6 +8,7 @@ diagnose the patient or infer missing clinical information.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from google import genai
@@ -21,6 +22,15 @@ logger = logging.getLogger(__name__)
 
 MAX_CASE_LENGTH = 8000
 MAX_SEARCH_QUERY_LENGTH = 2000
+
+
+def _normalized_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def _fact_is_supported(fact: str, case_normalized: str) -> bool:
+    normalized_fact = _normalized_text(fact)
+    return bool(normalized_fact) and normalized_fact in case_normalized
 
 
 def _build_prompt(patient_case: str) -> str:
@@ -61,23 +71,55 @@ def _validate_profile(
     patient_case: str,
 ) -> PatientProfile:
     """Apply deterministic checks to the extracted profile."""
-    case_lower = patient_case.casefold()
+    case_normalized = _normalized_text(patient_case)
 
     # Age must be explicitly supported by the submitted case.
     if profile.age_years is not None:
         age_text = str(profile.age_years).rstrip("0").rstrip(".")
-        age_is_present = (
-            f"{age_text} year" in case_lower
-            or f"{age_text}-year" in case_lower
-            or f"age {age_text}" in case_lower
-            or f"aged {age_text}" in case_lower
+        age_is_present = bool(
+            re.search(
+                rf"\b{re.escape(age_text)}[\s-]*(?:years?\s*old|year-old|yo)\b"
+                rf"|\b(?:age|aged)\s*{re.escape(age_text)}\b",
+                patient_case,
+                flags=re.IGNORECASE,
+            )
         )
 
         if not age_is_present:
             profile.age_years = None
 
-    # Do not allow an empty search query to silently continue.
-    search_query = (profile.search_query or "").strip()
+    stated_sexes = {
+        value.upper()
+        for value in re.findall(r"\b(?:male|female)\b", patient_case, re.IGNORECASE)
+    }
+    if profile.sex not in stated_sexes or len(stated_sexes) != 1:
+        profile.sex = "UNKNOWN"
+
+    for field_name in (
+        "primary_conditions",
+        "comorbidities",
+        "current_medications",
+        "prior_treatments",
+        "key_findings",
+    ):
+        facts = getattr(profile, field_name)
+        setattr(
+            profile,
+            field_name,
+            [
+                fact
+                for fact in facts
+                if _fact_is_supported(fact, case_normalized)
+            ],
+        )
+
+    # Keep generated search terms only when their words occur in the case.
+    case_words = set(re.findall(r"[a-z0-9]+", case_normalized))
+    search_words = re.findall(
+        r"[a-z0-9]+",
+        (profile.search_query or "").casefold(),
+    )
+    search_query = " ".join(word for word in search_words if word in case_words)
     if not search_query:
         search_query = " ".join(patient_case.split()[:80])
 
@@ -135,6 +177,9 @@ def parse_patient(patient_case: str) -> PatientProfile:
             vertexai=True,
             project=settings.gcp_project,
             location=settings.gcp_location,
+            http_options=types.HttpOptions(
+                timeout=max(1, round(settings.adk_timeout_seconds * 1000))
+            ),
         )
 
         response = client.models.generate_content(

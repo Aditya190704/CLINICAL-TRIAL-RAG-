@@ -182,6 +182,9 @@ def embed(
         vertexai=True,
         project=settings.gcp_project,
         location=settings.gcp_location,
+        http_options=types.HttpOptions(
+            timeout=max(1, round(settings.adk_timeout_seconds * 1000))
+        ),
     )
 
     all_vectors: list[list[float]] = []

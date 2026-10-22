@@ -28,6 +28,9 @@ from app.services.retriever import retrieve
 from app.services.trial_store import chunks, trials
 
 logger = logging.getLogger(__name__)
+_JUDGE_SEMAPHORE = threading.BoundedSemaphore(
+    max(1, int(settings.adk_concurrency))
+)
 
 DISCLAIMER = (
     "This tool provides research assistance, not a medical diagnosis or treatment "
@@ -246,10 +249,22 @@ async def _judge_one(
         nct_id = _trial_id(trial)
 
         try:
-            criteria, summary, dropped_unverified = await asyncio.to_thread(
-                judge, case, profile, trial
+            criteria, _, dropped_unverified = await asyncio.to_thread(
+                _judge_with_global_limit, case, profile, trial
             )
             verdict = compute_verdict(criteria)
+            if verdict == "EXCLUDED":
+                summary = (
+                    "A potentially disqualifying criterion was identified in this "
+                    "preliminary review. A qualified clinical team must verify the "
+                    "evidence against the official trial criteria."
+                )
+            else:
+                summary = (
+                    "Some assessed criteria may be supported, but this review may "
+                    "be incomplete and does not establish eligibility. A qualified "
+                    "clinical team must review all official criteria."
+                )
 
             return {
                 "nct_id": nct_id,
@@ -297,6 +312,16 @@ async def _judge_one(
                 "verdict": "POSSIBLY_ELIGIBLE",
                 "error": type(exc).__name__,
             }
+
+
+def _judge_with_global_limit(
+    case: str,
+    profile: PatientProfile,
+    trial: dict[str, Any],
+) -> tuple[list[CriterionResult], str, int]:
+    """Limit judge model calls across concurrent API requests in this process."""
+    with _JUDGE_SEMAPHORE:
+        return judge(case, profile, trial)
 
 
 def _verdict_priority(verdict: str) -> int:

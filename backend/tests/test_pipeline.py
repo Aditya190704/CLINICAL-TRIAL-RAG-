@@ -81,7 +81,7 @@ def test_pipeline_run_integration(mock_chunks, mock_trials, mock_judge, mock_ret
         "NCT002::overview::0": {"nct_id": "NCT002", "type": "overview", "text": "Trial 2 overview text"},
     }
 
-    # First trial is POSSIBLY_ELIGIBLE (contains UNKNOWN criteria), second is ELIGIBLE
+    # One trial has UNKNOWN criteria; the other has only assessed support.
     mock_judge.side_effect = [
         (
             [CriterionResult(source="TRIAL_TEXT", criterion_type="INCLUSION", criterion_quote="HER2+", patient_evidence="", impact="UNKNOWN", explanation="Missing HER2 lab")],
@@ -100,9 +100,10 @@ def test_pipeline_run_integration(mock_chunks, mock_trials, mock_judge, mock_ret
 
     assert resp.patient_profile.sex == "FEMALE"
     assert len(resp.matches) == 2
-    # ELIGIBLE trial should be ranked first before POSSIBLY_ELIGIBLE per ORDER
+    # The trial with supported criteria ranks first, but neither is conclusive.
     assert resp.matches[0].nct_id == "NCT002"
-    assert resp.matches[0].verdict == "ELIGIBLE"
+    assert resp.matches[0].verdict == "POSSIBLY_ELIGIBLE"
+    assert "does not establish eligibility" in resp.matches[0].summary
     assert resp.matches[1].nct_id == "NCT001"
     assert resp.matches[1].verdict == "POSSIBLY_ELIGIBLE"
     assert resp.matches[0].relevance_score == 0.75
@@ -159,4 +160,3 @@ def test_match_endpoint_permission_error_handling(mock_run):
     resp = client.post("/api/match", json=payload)
     assert resp.status_code == 503
     assert "BigQuery IAM permissions" in resp.json()["detail"]
-
