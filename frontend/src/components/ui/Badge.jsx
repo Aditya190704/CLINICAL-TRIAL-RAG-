@@ -30,7 +30,7 @@ const IMPACT_CONFIG = {
     variant: "danger",
   },
   UNKNOWN: {
-    label: "Needs info",
+    label: "Could not assess",
     icon: "?",
     variant: "neutral",
   },

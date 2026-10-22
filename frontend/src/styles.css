@@ -2732,3 +2732,28 @@ button {
     width: 100vw;
   }
 }
+
+.result-safety-notice {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 18px;
+  padding: 18px 20px;
+  border: 1px solid var(--border-color, #d6dce5);
+  border-radius: 12px;
+  background: var(--surface-color, #fff);
+}
+
+.result-safety-notice h3 {
+  margin: 0 0 6px;
+}
+
+.result-safety-notice p,
+.result-safety-notice ul {
+  margin: 0;
+}
+
+.result-safety-urgent {
+  border-color: #b42318;
+  background: #fff4f2;
+  color: #7a271a;
+}

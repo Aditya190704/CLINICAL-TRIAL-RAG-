@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import logging
 import math
-import random
 import time
 from typing import Literal, Sequence
 
@@ -13,13 +12,14 @@ from google import genai
 from google.genai import types
 
 from app.config import settings
+from app.safe_logging import log_safe_error
 
 logger = logging.getLogger(__name__)
 
 # Keep requests within a low per-minute quota.
 BATCH_SIZE = 20
-MAX_RETRIES = 6
-RETRY_DELAY_SECONDS = 5.0
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 1.0
 REQUEST_INTERVAL_SECONDS = 12.0
 
 TaskType = Literal["RETRIEVAL_DOCUMENT", "RETRIEVAL_QUERY"]
@@ -114,26 +114,14 @@ def _embed_batch(
             if attempt == MAX_RETRIES - 1:
                 break
 
-            # Exponential backoff plus jitter.
+            # Short bounded backoff avoids a long request storm when quota is exhausted.
             delay = RETRY_DELAY_SECONDS * (2**attempt)
-            delay += random.uniform(0, 1)
 
-            logger.warning(
-                "Embedding request failed (attempt %d/%d, error=%s). "
-                "Retrying in %.1f seconds.",
-                attempt + 1,
-                MAX_RETRIES,
-                type(exc).__name__,
-                delay,
-            )
+            log_safe_error(logger, request_id=None, step=f"embedding_retry_{attempt + 1}", error=exc)
 
             time.sleep(delay)
 
-    logger.error(
-        "Embedding batch failed after %d attempts (%s).",
-        MAX_RETRIES,
-        type(last_error).__name__ if last_error else "unknown error",
-    )
+    log_safe_error(logger, request_id=None, step="embedding_batch", error=last_error or RuntimeError())
 
     raise RuntimeError(
         "Could not generate embeddings. Check Vertex AI quota, "

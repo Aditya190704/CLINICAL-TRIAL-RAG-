@@ -124,10 +124,14 @@ export function useSessionManager() {
 
           // Auto-generate a smart title if user has a default title
           // and a patient case or clinical profile was provided
+          const isGeneratedTitle =
+            !s.title ||
+            s.title === "New Patient Session" ||
+            s.title.startsWith("Patient Case") ||
+            /^\d{1,3}yo\s*[•·]/i.test(s.title) ||
+            /^\d{1,3}[-\s]?year[-\s]?old\b/i.test(s.title);
           if (
-            (!s.title ||
-              s.title === "New Patient Session" ||
-              s.title.startsWith("Patient Case")) &&
+            isGeneratedTitle &&
             (patch.patientCase || patch.data?.patient_profile)
           ) {
             const newTitle = generateSessionTitle(

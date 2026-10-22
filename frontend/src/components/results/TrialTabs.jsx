@@ -30,7 +30,7 @@ export default function TrialTabs({
           >
             <div className="tab-top-row">
               <span className="tab-rank">#{rank}</span>
-              <span className="tab-score-pill">{score} Match</span>
+              <span className="tab-score-pill">{score} Similarity</span>
               <Badge verdict={trial.verdict} size="sm" />
             </div>
 

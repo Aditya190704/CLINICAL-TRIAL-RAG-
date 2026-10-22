@@ -86,10 +86,16 @@ export function truncate(text, maxLen = 80) {
 export function generateSessionTitle(patientCase, profile) {
   if (!patientCase || !patientCase.trim()) return "New Patient Session";
 
+  const explicitAges = [...patientCase.matchAll(/\b(\d{1,3})(?:\s*years?\s*old|-year-old|\s*yo)\b/gi)];
+  const caseAge = explicitAges.length === 1 ? Number(explicitAges[0][1]) : null;
+
   // If we have an extracted profile, build an informative clinical title
   if (profile) {
     const parts = [];
-    if (profile.age_years) parts.push(`${Math.round(profile.age_years)}yo`);
+    if (caseAge != null) parts.push(`${caseAge}yo`);
+    else if (profile.age_years != null && explicitAges.length === 0) {
+      parts.push(`${Math.round(profile.age_years)}yo`);
+    }
     if (profile.sex && profile.sex !== "UNKNOWN") {
       parts.push(profile.sex === "FEMALE" ? "Female" : "Male");
     }

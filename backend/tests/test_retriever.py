@@ -189,7 +189,7 @@ def test_execute_vector_search_not_found():
     mock_client = MagicMock()
     mock_client.query.side_effect = gcp_exceptions.NotFound("Table not found")
 
-    with pytest.raises(RuntimeError, match="BigQuery resource not found"):
+    with pytest.raises(RuntimeError, match="BigQuery trial search is unavailable"):
         execute_vector_search(mock_client, [[0.1] * 768], top_k=5)
 
 
@@ -198,7 +198,7 @@ def test_execute_vector_search_forbidden():
     mock_client = MagicMock()
     mock_client.query.side_effect = gcp_exceptions.Forbidden("Access denied")
 
-    with pytest.raises(PermissionError, match="Permission denied accessing BigQuery table"):
+    with pytest.raises(PermissionError, match="BigQuery access is not configured"):
         execute_vector_search(mock_client, [[0.1] * 768], top_k=5)
 
 
@@ -207,7 +207,7 @@ def test_execute_vector_search_bad_request():
     mock_client = MagicMock()
     mock_client.query.side_effect = gcp_exceptions.BadRequest("Invalid SQL")
 
-    with pytest.raises(RuntimeError, match="BadRequest"):
+    with pytest.raises(RuntimeError, match="BigQuery trial search could not be completed"):
         execute_vector_search(mock_client, [[0.1] * 768], top_k=5)
 
 

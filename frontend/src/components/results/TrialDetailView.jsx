@@ -208,7 +208,7 @@ export default function TrialDetailView({
             </div>
             <div className="tally-item tally-unknown">
               <span className="tally-count">{unknownCount}</span>
-              <span className="tally-name">Needs Info</span>
+              <span className="tally-name">Could not assess</span>
             </div>
           </div>
         </div>

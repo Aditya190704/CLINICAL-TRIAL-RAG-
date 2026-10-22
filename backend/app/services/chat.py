@@ -16,15 +16,17 @@ from __future__ import annotations
 import logging
 import math
 import re
+import asyncio
 from collections import Counter
 from typing import Any
 
 from google.cloud import bigquery
-from google import genai
-
+from app.agents.tasks import answer_trial_question
 from app.config import settings
+from app.safe_logging import log_safe_error
 from app.services.embeddings import embed
 from app.services.trial_store import chunks, trials
+from app.services.untrusted_text import remove_instruction_like_clauses
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +35,7 @@ MAX_TRIAL_IDS = 10
 MAX_EVIDENCE_PER_TRIAL = 4
 MAX_TOTAL_EVIDENCE = 12
 MAX_EVIDENCE_CHARS = 3000
-MAX_ANSWER_CHARS = 12000
+MAX_CHAT_SECONDS = min(240.0, max(60.0, settings.adk_timeout_seconds * 2))
 
 _STOP_WORDS = {
     "a", "an", "and", "are", "as", "at", "be", "been", "being", "by",
@@ -68,7 +70,7 @@ def _normalize_trial_ids(trial_ids: list[str]) -> list[str]:
 
 
 def _validate_question(question: str) -> str:
-    question = (question or "").strip()
+    question = remove_instruction_like_clauses((question or "").strip())
 
     if not question:
         raise ValueError("Enter a question.")
@@ -364,10 +366,7 @@ def retrieve_for_chat(
         )
     except Exception as exc:
         # Do not log the question, patient case, or retrieved medical text.
-        logger.warning(
-            "BigQuery chat retrieval failed (%s); trying local processed chunks.",
-            type(exc).__name__,
-        )
+        log_safe_error(logger, request_id=None, step="chat_vector_search", error=exc)
 
     local_evidence = _retrieve_local_evidence(question, selected_trial_ids)
 
@@ -385,7 +384,7 @@ def build_evidence_from_candidates(
 
     for candidate in candidates:
         nct_id = str(candidate.get("nct_id") or "").upper()
-        text = str(candidate.get("text") or "").strip()
+        text = remove_instruction_like_clauses(str(candidate.get("text") or ""))
 
         if not re.fullmatch(r"NCT\d{8}", nct_id) or not text:
             continue
@@ -403,23 +402,8 @@ def build_evidence_from_candidates(
     return result
 
 
-def _format_evidence(evidence: list[dict[str, Any]]) -> str:
-    blocks: list[str] = []
-
-    for index, item in enumerate(evidence, start=1):
-        blocks.append(
-            f"[Evidence {index}]\n"
-            f"Trial ID: {item['nct_id']}\n"
-            f"Section: {item['section']}\n"
-            f"Source URL: {item['url']}\n"
-            f"Trial text:\n{item['text'][:MAX_EVIDENCE_CHARS]}"
-        )
-
-    return "\n\n".join(blocks)
-
-
-def answer_question(question: str, evidence: list[dict[str, Any]]) -> str:
-    """Generate an evidence-grounded answer with Gemini."""
+async def answer_question(question: str, evidence: list[dict[str, Any]]) -> str:
+    """Generate an evidence-grounded answer with the request-scoped ADK agent."""
     if not evidence:
         return (
             "I couldn't retrieve supporting text from the selected trials for "
@@ -427,70 +411,24 @@ def answer_question(question: str, evidence: list[dict[str, Any]]) -> str:
             "information. I won't infer an answer without trial evidence."
         )
 
-    evidence_text = _format_evidence(evidence)
-
-    prompt = f"""
-You are an expert clinical trial Q&A research assistant.
-
-The user is asking a specific question about 3 clinical trials retrieved for their case.
-
-CRITICAL INSTRUCTIONS:
-1. ANSWER ONLY WHAT WAS ASKED:
-   - Provide a direct, clean, and concise answer directly addressing the user's question.
-   - Do NOT produce lengthy essays, unnecessary filler, unsolicited background lectures, or redundant disclaimers.
-   - If the user asks for specific inclusion/exclusion criteria, list only those relevant criteria cleanly.
-   - If the user asks a yes/no question or a specific factual question (e.g., age requirements, drug name, study phase, acceptance of specific condition), answer the core point directly first, followed by clean bullet points.
-2. STRICT EVIDENCE GROUNDING:
-   - Use ONLY facts explicitly documented in the RETRIEVED TRIAL EVIDENCE below.
-   - Never speculate, assume, or hallucinate criteria or study features.
-   - Clearly attribute findings to the specific trial NCT ID (e.g. **NCT07601178**).
-   - If the evidence does not mention what was asked or is insufficient, explicitly and briefly state that the available evidence for those trials does not state it.
-3. CLEAN & PROFESSIONAL FORMATTING:
-   - Use structured Markdown: bold key terms/trial IDs, use concise bullet points, and keep paragraphs short (1-3 sentences).
-   - Do not add repetitive boilerplate warnings.
-
-USER QUESTION:
-{question}
-
-RETRIEVED TRIAL EVIDENCE:
-{evidence_text}
-""".strip()
-
-    client = genai.Client(
-        vertexai=True,
-        project=settings.gcp_project,
-        location=settings.gcp_location,
-        http_options=types.HttpOptions(
-            timeout=max(1, round(settings.adk_timeout_seconds * 1000))
-        ),
-    )
-
-    try:
-        response = client.models.generate_content(
-            model=settings.gemini_model,
-            contents=prompt,
-        )
-
-        answer = (getattr(response, "text", None) or "").strip()
-        if not answer:
-            raise RuntimeError("Gemini returned an empty answer.")
-
-        return answer[:MAX_ANSWER_CHARS]
-
-    finally:
-        client.close()
+    return await answer_trial_question(question=question, evidence=evidence)
 
 
-def chat_answer(
+async def _chat_answer(
     question: str,
     trial_ids: list[str],
-    patient_case: str | None = None,
 ) -> dict[str, Any]:
     """Answer a question about selected trials and return citation metadata."""
     question = _validate_question(question)
     selected_trial_ids = _normalize_trial_ids(trial_ids)
+    known_trial_ids = set(_trial_lookup())
+    if any(trial_id not in known_trial_ids for trial_id in selected_trial_ids):
+        raise ValueError("One or more selected trials are not available.")
 
-    evidence = retrieve_for_chat(question, selected_trial_ids)
+    evidence = await asyncio.wait_for(
+        asyncio.to_thread(retrieve_for_chat, question, selected_trial_ids),
+        timeout=settings.adk_timeout_seconds,
+    )
     evidence = build_evidence_from_candidates(evidence)
 
     if not evidence:
@@ -506,18 +444,8 @@ def chat_answer(
             ),
         }
 
-    # Patient context is optional. It is included only to help interpret the
-    # user's question, not as a source of trial facts.
-    contextual_question = question
-    if patient_case and patient_case.strip():
-        safe_case = patient_case.strip()[:8000]
-        contextual_question = (
-            f"Patient context supplied by the user (not trial evidence):\n"
-            f"{safe_case}\n\n"
-            f"User question:\n{question}"
-        )
-
-    answer = answer_question(contextual_question, evidence)
+    # Patient narratives are not needed for evidence-only trial chat.
+    answer = await answer_question(question, evidence)
     trial_lookup = _trial_lookup()
 
     citations: list[dict[str, Any]] = []
@@ -548,3 +476,15 @@ def chat_answer(
         "citations": citations,
         "missing_info": None,
     }
+
+
+async def chat_answer(
+    question: str,
+    trial_ids: list[str],
+    patient_case: str | None = None,
+) -> dict[str, Any]:
+    """Run selected-trial chat with an overall timeout and no persistent memory."""
+    return await asyncio.wait_for(
+        _chat_answer(question, trial_ids),
+        timeout=MAX_CHAT_SECONDS,
+    )

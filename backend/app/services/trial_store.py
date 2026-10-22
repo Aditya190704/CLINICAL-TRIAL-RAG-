@@ -256,10 +256,7 @@ def trials() -> list[dict[str, Any]]:
             continue
 
         if nct_id in seen_ids:
-            logger.warning(
-                "Skipping duplicate processed trial %s.",
-                nct_id,
-            )
+            logger.warning("Skipping a duplicate processed trial record.")
             continue
 
         seen_ids.add(nct_id)
@@ -291,17 +288,11 @@ def chunks() -> list[dict[str, Any]]:
             continue
 
         if not nct_id:
-            logger.warning(
-                "Skipping chunk %s without an NCT identifier.",
-                chunk_id,
-            )
+            logger.warning("Skipping a processed chunk without an NCT identifier.")
             continue
 
         if chunk_id in seen_chunk_ids:
-            logger.warning(
-                "Skipping duplicate chunk ID %s.",
-                chunk_id,
-            )
+            logger.warning("Skipping a duplicate processed chunk record.")
             continue
 
         record["chunk_id"] = chunk_id

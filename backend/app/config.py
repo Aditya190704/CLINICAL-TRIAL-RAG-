@@ -60,8 +60,12 @@ class Settings(BaseSettings):
 
     # Gemini configuration
     gemini_model: str = Field(
-        default="gemini-2.5-flash",
+        default="gemini-3.8-flash",
         validation_alias="GEMINI_MODEL",
+    )
+    gemini_location: str = Field(
+        default="global",
+        validation_alias="GEMINI_LOCATION",
     )
 
     # Retrieval and ranking
@@ -138,6 +142,7 @@ class Settings(BaseSettings):
         "bigquery_chunks_table",
         "embedding_model",
         "gemini_model",
+        "gemini_location",
         "adk_app_name",
     )
     @classmethod

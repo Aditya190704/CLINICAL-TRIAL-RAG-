@@ -1,0 +1,18 @@
+{
+  "review_status": "PLACEHOLDER_PENDING_REVIEW_AND_APPROVAL_BY_A_QUALIFIED_CLINICIAN",
+  "warning_signs": [
+    "severe chest pain",
+    "chest pain",
+    "severe difficulty breathing",
+    "difficulty breathing",
+    "cannot breathe",
+    "uncontrolled bleeding",
+    "heavy bleeding",
+    "sudden loss of consciousness",
+    "loss of consciousness",
+    "sudden weakness on one side",
+    "sudden weakness",
+    "suicidal thoughts with immediate intent"
+  ],
+  "negation_terms": ["no", "not", "denies", "without", "negative for", "never"]
+}

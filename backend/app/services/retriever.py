@@ -15,7 +15,9 @@ from google.api_core import exceptions as gcp_exceptions
 from google.cloud import bigquery
 
 from app.config import settings
+from app.safe_logging import log_safe_error
 from app.services.embeddings import embed
+from app.services.untrusted_text import contains_instruction_like_text
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ class Candidate:
     rrf: float = 0.0
     best_sim: float = 0.0
     chunk_ids: list[str] = field(default_factory=list)
+    untrusted_instruction: bool = False
 
 
 def validate_embeddings(
@@ -126,7 +129,7 @@ FROM VECTOR_SEARCH(
   top_k => @top_k,
   distance_type => 'COSINE'
 )
-ORDER BY query.query_id, distance ASC
+ORDER BY query.query_id, distance ASC, base.chunk_id ASC
 """
     return sql.strip()
 
@@ -163,34 +166,21 @@ def execute_vector_search(
         query_job = client.query(sql, job_config=job_config, location=settings.bq_location)
         rows = list(query_job.result())
         return rows
-    except gcp_exceptions.NotFound as e:
-        msg = (
-            f"BigQuery resource not found: `{project}.{dataset}.{table}` in location "
-            f"'{settings.bq_location}'. Ensure the dataset and table are created and populated. "
-            f"Original error: {e}"
-        )
-        logger.error(msg)
-        raise RuntimeError(msg) from e
-    except gcp_exceptions.Forbidden as e:
-        msg = (
-            f"Permission denied accessing BigQuery table `{project}.{dataset}.{table}`. "
-            f"Ensure your GCP credentials or Service Account has BigQuery Data Viewer and "
-            f"BigQuery Job User roles. Original error: {e}"
-        )
-        logger.error(msg)
-        raise PermissionError(msg) from e
-    except gcp_exceptions.BadRequest as e:
-        msg = f"BigQuery vector search query failed (BadRequest): {e}"
-        logger.error(msg)
-        raise RuntimeError(msg) from e
-    except gcp_exceptions.GoogleAPICallError as e:
-        msg = f"BigQuery vector search API call failed: {e}"
-        logger.error(msg)
-        raise RuntimeError(msg) from e
-    except Exception as e:
-        msg = f"Unexpected error during BigQuery vector search: {e}"
-        logger.error(msg)
-        raise RuntimeError(msg) from e
+    except gcp_exceptions.NotFound as exc:
+        log_safe_error(logger, request_id=None, step="vector_search", error=exc)
+        raise RuntimeError("BigQuery trial search is unavailable.") from exc
+    except gcp_exceptions.Forbidden as exc:
+        log_safe_error(logger, request_id=None, step="vector_search", error=exc)
+        raise PermissionError("BigQuery access is not configured.") from exc
+    except gcp_exceptions.BadRequest as exc:
+        log_safe_error(logger, request_id=None, step="vector_search", error=exc)
+        raise RuntimeError("BigQuery trial search could not be completed.") from exc
+    except gcp_exceptions.GoogleAPICallError as exc:
+        log_safe_error(logger, request_id=None, step="vector_search", error=exc)
+        raise RuntimeError("BigQuery trial search could not be completed.") from exc
+    except Exception as exc:
+        log_safe_error(logger, request_id=None, step="vector_search", error=exc)
+        raise RuntimeError("BigQuery trial search could not be completed.") from exc
 
 
 def _row_val(row: Any, key: str, default: Any = None) -> Any:
@@ -245,6 +235,8 @@ def fuse_and_deduplicate(rows: list[Any]) -> list[Candidate]:
 
             cand = candidates[nct]
             cand.nct_id = nct
+            if contains_instruction_like_text(str(_row_val(row, "chunk_text", "") or "")):
+                cand.untrusted_instruction = True
 
             if cid not in cand.chunk_ids:
                 cand.chunk_ids.append(cid)
@@ -255,7 +247,7 @@ def fuse_and_deduplicate(rows: list[Any]) -> list[Candidate]:
 
             cand.best_sim = max(cand.best_sim, similarity)
 
-    return sorted(candidates.values(), key=lambda c: (c.rrf, c.best_sim), reverse=True)
+    return sorted(candidates.values(), key=lambda c: (-c.rrf, -c.best_sim, c.nct_id))
 
 
 def retrieve(

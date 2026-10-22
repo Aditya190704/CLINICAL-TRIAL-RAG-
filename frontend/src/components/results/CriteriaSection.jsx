@@ -4,7 +4,7 @@ import { deduplicateCriteria } from "../../utils/deduplication";
 
 /**
  * Structured Eligibility Criteria Section.
- * Organizes criteria into Met, Blocking, and Unknown categories with verbatim quotes.
+ * Organizes criteria into Met, Blocking, and Could not assess categories with verbatim quotes.
  */
 export default function CriteriaSection({ criteria = [] }) {
   const [filter, setFilter] = useState("ALL");
@@ -83,7 +83,7 @@ export default function CriteriaSection({ criteria = [] }) {
             className={`filter-btn filter-unknown ${filter === "UNKNOWN" ? "filter-active" : ""}`}
             onClick={() => setFilter("UNKNOWN")}
           >
-            ? Needs Info ({unknownList.length})
+            ? Could not assess ({unknownList.length})
           </button>
         </div>
       </div>

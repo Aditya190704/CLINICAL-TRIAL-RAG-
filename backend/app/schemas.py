@@ -1,7 +1,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -85,12 +85,42 @@ class PatientProfile(APIModel):
     )
 
 
+class PatientExtractionOutput(APIModel):
+    """ADK structured extraction including explicit uncertainty signals."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    profile: PatientProfile
+    missing_key_facts: list[str] = Field(default_factory=list, max_length=12)
+    conflicting_facts: list[str] = Field(default_factory=list, max_length=12)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_unknown_profile_fields(cls, value):
+        if isinstance(value, dict) and isinstance(value.get("profile"), dict):
+            extra = set(value["profile"]) - set(PatientProfile.model_fields)
+            if extra:
+                raise ValueError("Unexpected patient profile fields.")
+        return value
+
+
+class RefinementOutput(APIModel):
+    """Optional single search refinement proposed by the search agent."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    refine: bool = False
+    search_query: str = Field(default="", max_length=2000)
+
+
 # ---------------------------------------------------------------------------
 # Eligibility judge output
 # ---------------------------------------------------------------------------
 
 class JudgedCriterion(APIModel):
     """Raw structured output from the Gemini eligibility judge."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     criterion_type: Literal["INCLUSION", "EXCLUSION"]
 
@@ -115,6 +145,8 @@ class JudgedCriterion(APIModel):
 
 class JudgeOutput(APIModel):
     """Structured output returned by the eligibility judge."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     criteria: list[JudgedCriterion] = Field(default_factory=list)
 
@@ -196,6 +228,10 @@ class MatchResponse(APIModel):
     matches: list[TrialMatch] = Field(default_factory=list)
 
     disclaimer: str = Field(default="")
+
+    emergency_notice: str | None = None
+    missing_key_facts: list[str] = Field(default_factory=list)
+    conflicting_facts: list[str] = Field(default_factory=list)
 
     latency_seconds: float = Field(default=0, ge=0)
 

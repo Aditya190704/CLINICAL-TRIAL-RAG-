@@ -1,110 +1,100 @@
-
-"""API-facing entry point for clinical-trial matching."""
+"""Validated API-facing boundary for the clinical-trial workflow."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
+from uuid import uuid4
 
-from app.agents.workflow import run_adk_workflow
-from app.schemas import MatchResponse
-
-logger = logging.getLogger(__name__)
+from app.agents.workflow import DISCLAIMER, WorkflowError, run_workflow_async
+from app.schemas import MatchResponse, PatientProfile
+from app.safe_logging import log_safe_error, reset_request_id, set_request_id
+from app.services.safety import EMERGENCY_NOTICE, screen_urgent_case
 
 MIN_CASE_LENGTH = 40
 MAX_CASE_LENGTH = 8000
 
-# Basic screening for common direct identifiers.
-# This is a guardrail, not a complete de-identification system.
 PHI_PATTERNS = {
-    "email": re.compile(
-        r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
-        re.IGNORECASE,
-    ),
+    "email": re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I),
     "us_ssn": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
     "phone": re.compile(
-        r"(?<!\d)(?:\+?1[\s.-]?)?"
-        r"(?:\(\d{3}\)|\d{3})[\s.-]?"
-        r"\d{3}[\s.-]?\d{4}(?!\d)"
+        r"(?<!\d)(?:\+?1[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)"
     ),
 }
-
-# Single regex pattern for backward-compatibility with tests/callers
 PHI = re.compile(
     r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b|\b\d{3}-\d{2}-\d{4}\b|(?<!\d)(?:\+?1[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)",
-    re.IGNORECASE,
+    re.I,
 )
-
 ORDER = {"ELIGIBLE": 0, "POSSIBLY_ELIGIBLE": 1, "EXCLUDED": 2}
 
 
 def _validate_case(case: str) -> str:
-    """Validate the case without logging its contents."""
     if not isinstance(case, str):
         raise ValueError("Patient case must be provided as text.")
-
     case = case.strip()
-
     if len(case) < MIN_CASE_LENGTH:
-        raise ValueError(
-            f"Patient case must contain at least {MIN_CASE_LENGTH} characters."
-        )
-
+        raise ValueError(f"Patient case must contain at least {MIN_CASE_LENGTH} characters.")
     if len(case) > MAX_CASE_LENGTH:
-        raise ValueError(
-            f"Patient case must not exceed {MAX_CASE_LENGTH} characters."
-        )
-
+        raise ValueError(f"Patient case must not exceed {MAX_CASE_LENGTH} characters.")
     return case
 
 
 def _contains_possible_direct_identifier(case: str) -> bool:
-    """Return True when a common direct identifier pattern is detected."""
     return any(pattern.search(case) for pattern in PHI_PATTERNS.values())
 
 
-def run(case: str) -> MatchResponse:
-    """Validate an anonymous patient case and execute the matching workflow."""
+async def run_async(case: str, request_id: str | None = None) -> MatchResponse:
+    """Validate, apply deterministic safety screening, then call the workflow."""
     case = _validate_case(case)
-
     if _contains_possible_direct_identifier(case):
         raise ValueError(
-            "The patient case may contain a direct personal identifier, "
-            "such as an email address, phone number, or SSN. Remove direct "
-            "identifiers and submit an anonymized clinical summary."
+            "The patient case may contain a direct personal identifier, such as an "
+            "email address, phone number, or SSN. Remove direct identifiers and "
+            "submit an anonymized clinical summary."
         )
 
-    started_at = time.perf_counter()
-
+    request_id = request_id or str(uuid4())
+    token = set_request_id(request_id)
+    started = time.perf_counter()
     try:
-        response = run_adk_workflow(case)
+        try:
+            urgent = screen_urgent_case(case)
+        except Exception as exc:
+            log_safe_error(logging.getLogger(__name__), request_id=request_id, step="urgent_screen", error=exc)
+            raise WorkflowError(
+                "URGENT_SCREEN_FAILED",
+                "The safety screen could not be completed. Please try again later.",
+            ) from exc
 
-        if not isinstance(response, MatchResponse):
-            response = MatchResponse.model_validate(response)
+        if urgent:
+            return MatchResponse(
+                patient_profile=PatientProfile(search_query="Search not performed"),
+                matches=[],
+                disclaimer=DISCLAIMER,
+                emergency_notice=EMERGENCY_NOTICE,
+                latency_seconds=round(time.perf_counter() - started, 3),
+            )
 
-        elapsed_seconds = round(time.perf_counter() - started_at, 3)
-
-        logger.info(
-            "Clinical-trial matching completed in %.3f seconds.",
-            elapsed_seconds,
-        )
-
-        return response.model_copy(
-            update={"latency_seconds": elapsed_seconds}
-        )
-
-    except ValueError:
-        # Preserve input and validation errors for the API layer.
+        response = await run_workflow_async(case, request_id=request_id)
+        return response.model_copy(update={"latency_seconds": round(time.perf_counter() - started, 3)})
+    except (ValueError, WorkflowError):
         raise
-
     except Exception as exc:
-        # Log the traceback, but never log the patient case or medical text.
-        logger.exception(
-            "Clinical-trial matching workflow failed (%s).",
-            type(exc).__name__,
-        )
-
-        raise RuntimeError(
-            "Clinical-trial matching failed. Check the backend logs for details."
+        log_safe_error(logging.getLogger(__name__), request_id=request_id, step="pipeline", error=exc)
+        raise WorkflowError(
+            "WORKFLOW_FAILED",
+            "Clinical-trial matching failed. Please try again later.",
         ) from exc
+    finally:
+        reset_request_id(token)
+
+
+def run(case: str, request_id: str | None = None) -> MatchResponse:
+    """Synchronous adapter; never starts a nested event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(run_async(case, request_id=request_id))
+    raise RuntimeError("An event loop is already running; await pipeline.run_async instead.")

@@ -65,13 +65,13 @@ def read_json(filename: str) -> Any | None:
         try:
             content = blob.download_as_text(encoding="utf-8")
         except NotFound:
-            logger.info("GCS object not found: %s", object_name)
+            logger.info("step=gcs_read result=not_found")
             return None
 
         try:
             return json.loads(content)
         except json.JSONDecodeError as exc:
-            logger.error("Invalid JSON in GCS object %s.", object_name)
+            logger.error("step=gcs_read error_category=InvalidJSON")
             raise ValueError(
                 f"GCS object '{object_name}' does not contain valid JSON."
             ) from exc
@@ -127,7 +127,7 @@ def write_json(
                 if_generation_match=0,
             )
 
-        logger.info("Uploaded JSON object to GCS: %s", object_name)
+        logger.info("step=gcs_write result=success")
         return object_name
 
     finally:
@@ -162,7 +162,7 @@ def delete_object(filename: str) -> bool:
 
         try:
             blob.delete()
-            logger.info("Deleted GCS object: %s", object_name)
+            logger.info("step=gcs_delete result=success")
             return True
         except NotFound:
             return False

@@ -790,7 +790,7 @@ export default function TrialCard({
 
             <span className="trial-score-value">{score}</span>
 
-            <span className="trial-score-label">Match score</span>
+            <span className="trial-score-label">Retrieval similarity</span>
             <div
               className="trial-score-track"
               role="progressbar"

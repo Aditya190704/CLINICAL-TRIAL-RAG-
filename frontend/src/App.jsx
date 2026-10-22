@@ -409,11 +409,36 @@ export default function App() {
       {/* ── Results Area ── */}
       {!loading && currentData && (
         <section className="results-container-section" ref={resultsRef}>
+          {(currentData.emergency_notice ||
+            currentData.missing_key_facts?.length > 0 ||
+            currentData.conflicting_facts?.length > 0) && (
+            <div className={`result-safety-notice ${currentData.emergency_notice ? "result-safety-urgent" : ""}`} role={currentData.emergency_notice ? "alert" : "status"}>
+              {currentData.emergency_notice && (
+                <section>
+                  <h3>Urgent safety notice</h3>
+                  <p>{currentData.emergency_notice}</p>
+                </section>
+              )}
+              {currentData.conflicting_facts?.length > 0 && (
+                <section>
+                  <h3>Conflicting information to review</h3>
+                  <ul>{currentData.conflicting_facts.map((item, index) => <li key={`conflict-${index}`}>{item}</li>)}</ul>
+                </section>
+              )}
+              {currentData.missing_key_facts?.length > 0 && (
+                <section>
+                  <h3>Information not provided</h3>
+                  <ul>{currentData.missing_key_facts.map((item, index) => <li key={`missing-${index}`}>{item}</li>)}</ul>
+                </section>
+              )}
+            </div>
+          )}
+
           {/* Summary Metric Bar */}
           <ResultsOverview
             data={currentData}
-            onCopySummary={handleCopySummary}
-            onOpenChat={() => setIsChatOpen(true)}
+            onCopySummary={currentMatches.length > 0 ? handleCopySummary : undefined}
+            onOpenChat={currentMatches.length > 0 ? () => setIsChatOpen(true) : undefined}
           />
 
           {/* Extracted Patient Profile */}
@@ -453,9 +478,9 @@ export default function App() {
             </div>
           ) : (
             <div className="no-matches-card">
-              <h4>No relevant recruiting trials were found</h4>
+              <h4>No candidate trials were returned for this search</h4>
               <p>
-                Try adding more clinical details or alternative condition synonyms to your case narrative.
+                This does not mean that no suitable trial exists. Review any missing or conflicting information and consult a qualified clinical team.
               </p>
             </div>
           )}

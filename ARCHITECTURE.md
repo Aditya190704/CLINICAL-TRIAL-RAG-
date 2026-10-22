@@ -14,46 +14,45 @@
 
 ## Overview
 
-Clinical Trial RAG has an offline data-preparation path and an online matching path. The ingestion scripts fetch trial records, create text chunks, and store their embeddings in BigQuery. At runtime, the React application sends a patient case to FastAPI, which retrieves candidate passages, asks Gemini to extract patient facts and assess criteria, and returns ranked results with evidence for review.
+The application separates offline trial-data preparation from online matching. A bounded ADK layer handles model reasoning. FastAPI and ordinary application code validate inputs, control retrieval, validate evidence, calculate verdicts, and rank results. The API returns preliminary decision support, not a clinical decision.
 
 ## High-Level Architecture
 
 ```mermaid
 flowchart LR
     CTG[ClinicalTrials.gov] --> ING[Ingestion scripts]
-    ING --> CHUNKS[Trial chunks and embeddings]
-    CHUNKS --> BQ[(BigQuery)]
-    USER[User] --> UI[React and Vite UI]
-    UI --> API[FastAPI API]
-    API --> PIPE[Matching workflow]
-    PIPE --> MODEL[Gemini and Vertex AI]
-    PIPE --> BQ
-    PIPE --> STORE[Trial metadata and passages]
-    STORE --> PIPE
-    PIPE --> API
+    ING --> BQ[(BigQuery trial chunks)]
+    ING -. Optional processed files .-> GCS[(Google Cloud Storage)]
+    USER[User] --> UI[React and Vite]
+    UI --> API[FastAPI]
+    API --> SAFE[Validation and urgent screen]
+    SAFE --> WF[Bounded workflow]
+    WF --> ADK[ADK task agents]
+    WF --> RET[Approved retrieval wrapper]
+    RET --> BQ
+    WF --> STORE[Configured trial store]
+    STORE --> WF
+    WF --> API
     API --> UI
-    UI --> CHAT[Trial follow-up chat]
-    CHAT --> API
 ```
 
-Ingestion prepares the searchable trial dataset separately from user requests. The online API combines parsing, retrieval, assessment, and presentation; follow-up chat is a separate API flow.
+Ingestion writes searchable chunks before runtime. The API applies safety checks before model or retrieval work. Agents receive only task data and have no arbitrary cloud, SQL, shell, filesystem, or network tools.
 
 ## Components
 
 | Component | Responsibility |
 |---|---|
-| React/Vite frontend | Collects case text and displays patient profiles, trial results, criteria, and chat. |
-| FastAPI `main.py` | Provides health, readiness, matching, and chat endpoints. |
-| `pipeline.py` | Validates case length and screens for common direct identifiers. |
-| `workflow.py` | Coordinates parsing, retrieval, judging, and ranking with Python `asyncio`. |
-| `patient_parser.py` | Extracts a structured patient profile using Gemini. |
-| `embeddings.py` and `retriever.py` | Embed query text and search BigQuery trial chunks. |
-| `eligibility_judge.py` | Assesses trial criteria and verifies evidence quotes against source text. |
-| `trial_store.py` | Loads trial metadata and evidence passages from processed data. |
-| `chat.py` | Answers follow-up questions about selected trials. |
-| `ingestion/` | Fetches trial records, chunks their text, and writes embeddings. |
-| BigQuery | Stores trial chunks, metadata, and embedding vectors. |
-| Optional GCS | Stores processed files when configured. |
+| React/Vite frontend | Sends matching and chat requests; displays notices, uncertainties, criteria, and citations. |
+| FastAPI `main.py` | HTTP boundary, request IDs, safe HTTP error mapping, health and readiness. |
+| `pipeline.py` | Length and direct-identifier validation, deterministic urgent screening, workflow entry. |
+| `agents/adk_runtime.py` | Creates one ADK `LlmAgent` and ephemeral in-memory session per model task; enforces per-call timeout and deletes the session. |
+| `agents/tasks.py` | Focused extraction, criteria-assessment, and follow-up chat agents. |
+| `agents/tools.py` | Validated retrieval request and request-local two-call budget around the existing retrieval service. |
+| `agents/workflow.py` | Extraction, one deterministic retrieval, candidate validation, serial capped assessment, deterministic verdict and similarity ranking. |
+| `services/eligibility_judge.py` | Verifies model quotes and computes conservative verdicts in ordinary code. |
+| `services/chat.py` | Retrieves evidence for validated selected trial IDs and returns citations. |
+| `services/trial_store.py` | Loads configured processed trial and passage data. |
+| `ingestion/` and BigQuery | Fetch, chunk, embed, and store trial records for vector retrieval. |
 
 ## Main User Flow
 
@@ -62,55 +61,74 @@ sequenceDiagram
     actor User
     participant UI as React UI
     participant API as FastAPI
+    participant Safety as Validation and urgent screen
     participant WF as Matching workflow
-    participant Model as Gemini and Vertex AI
+    participant ADK as ADK agents
+    participant Tool as Bounded retrieval wrapper
     participant BQ as BigQuery
-    participant Store as Trial store
-    User->>UI: Enter de-identified case
+    User->>UI: Submit anonymized case
     UI->>API: POST /api/match
-    API->>WF: Validate and start matching
-    WF->>Model: Extract patient profile
-    Model-->>WF: Structured patient facts
-    WF->>BQ: Search embedded trial chunks
-    BQ-->>WF: Candidate passages
-    WF->>Store: Load metadata and evidence
-    Store-->>WF: Trial details
-    WF->>Model: Assess criteria against case
-    Model-->>WF: Criterion assessments
-    WF->>WF: Verify evidence and rank results
-    WF-->>API: Match response
-    API-->>UI: Results and evidence
-    UI-->>User: Display ranked trials
+    API->>Safety: Validate length and identifiers
+    Safety->>Safety: Check urgent warning phrases
+    alt urgent warning found
+        Safety-->>API: Notice and empty results
+        API-->>UI: Advisory response
+    else continue matching
+        Safety->>WF: Start workflow
+        WF->>ADK: Extract facts and uncertainty
+        ADK-->>WF: Pydantic-validated profile
+        WF->>WF: Build sanitized deterministic query
+        WF->>Tool: One case-grounded query
+        Tool->>BQ: Search configured trial chunks
+        BQ-->>Tool: Candidate passages
+        Tool-->>WF: Candidate list
+        loop Each candidate in stable order
+            WF->>ADK: Assess one trial
+            ADK-->>WF: Criterion evidence
+            WF->>WF: Verify quotes and compute verdict
+        end
+        WF->>WF: Rank by similarity; NCT ID breaks ties
+        WF-->>API: MatchResponse
+        API-->>UI: Results and disclaimer
+    end
 ```
 
-The workflow retrieves candidates before evaluating their criteria. Results include evidence intended to help users review the assessment.
+There is exactly one retrieval query per match request. The same case produces the same sanitized query. Trial assessments run serially; a provider failure stops the loop before any later trial is sent. Assessment failures become API errors and do not produce fallback matches.
 
 ## Business Logic
 
 ```mermaid
 flowchart TD
-    CASE[Patient case] --> LENGTH{Valid length?}
-    LENGTH -->|No| REJECT[Return validation error]
-    LENGTH -->|Yes| IDENT{Common identifier detected?}
-    IDENT -->|Yes| REJECT
-    IDENT -->|No| PARSE[Extract patient facts]
-    PARSE --> RETRIEVE[Retrieve relevant trial chunks]
-    RETRIEVE --> ASSESS[Assess trial criteria]
-    ASSESS --> VERIFY[Verify quotes against source text]
+    CASE[Case text] --> VALID{Length and direct identifiers valid?}
+    VALID -->|No| ERROR[Safe validation error]
+    VALID -->|Yes| URGENT{Warning phrase not negated?}
+    URGENT -->|Yes| NOTICE[Emergency notice and empty results]
+    URGENT -->|No| EXTRACT[ADK fact extraction]
+    EXTRACT --> SANITIZE[Remove instruction-like clauses]
+    SANITIZE --> SEARCH[One deterministic case query]
+    SEARCH --> COUNT{Usable candidates}
+    COUNT -->|0| EMPTY[Return no candidates and uncertainty]
+    COUNT -->|One or more| ORDER[Sort by similarity and NCT ID]
+    ORDER --> ASSESS[Serially assess configured candidate cap]
+    ASSESS --> VERIFY[Verify source quotes]
     VERIFY --> BLOCK{Verified blocking criterion?}
-    BLOCK -->|Yes| EXCLUDED[Mark EXCLUDED]
-    BLOCK -->|No| POSSIBLE[Mark POSSIBLY_ELIGIBLE]
-    EXCLUDED --> RANK[Rank and return results]
+    BLOCK -->|Yes| EXCLUDED[EXCLUDED for review]
+    BLOCK -->|No| POSSIBLE[POSSIBLY_ELIGIBLE]
+    EXCLUDED --> RANK[Return in stable similarity order]
     POSSIBLE --> RANK
 ```
 
-A verified blocking criterion marks a trial `EXCLUDED` for review. Other assessed trials remain `POSSIBLY_ELIGIBLE`; the system does not establish clinical eligibility.
+Missing evidence maps to the existing `UNKNOWN` criterion state, shown in the UI as “Could not assess.” It never establishes eligibility. A verified blocker yields `EXCLUDED`; every other assessment remains `POSSIBLY_ELIGIBLE`. An empty result set describes only the search performed and does not mean no suitable trial exists.
+
+The emergency list is a conservative starter placeholder pending clinician approval. Negation handling is intentionally simple; keyword rules can miss emergencies and can produce false positives.
 
 ## Data Model
 
 ```mermaid
 erDiagram
     TRIAL ||--o{ TRIAL_CHUNK : contains
+    TRIAL ||--o{ MATCH_RESULT : considered_for
+    PATIENT_CASE ||--o{ MATCH_RESULT : produces
     TRIAL {
         string nct_id
         string title
@@ -123,10 +141,7 @@ erDiagram
         string chunk_type
         string chunk_text
         float_array embedding
-        string metadata_json
     }
-    PATIENT_CASE ||--o{ MATCH_RESULT : produces
-    TRIAL ||--o{ MATCH_RESULT : considered_for
     PATIENT_CASE {
         string case_text
         string extracted_profile
@@ -134,40 +149,42 @@ erDiagram
     MATCH_RESULT {
         string nct_id
         string verdict
-        string criteria_evidence
-        float relevance
+        string criterion_evidence
+        float relevance_score
     }
 ```
 
-Trial and chunk fields represent the BigQuery and processed-data concepts. Patient case and match result represent request and response data; they are not documented as persisted BigQuery entities.
+`TRIAL` and `TRIAL_CHUNK` reflect the trial data concepts stored in processed files and BigQuery. `PATIENT_CASE` and `MATCH_RESULT` describe transient request/response data; they are not stored server-side by this workflow.
 
 ## Deployment
 
 ```mermaid
 flowchart LR
-    BROWSER[User browser] -->|HTTPS| FRONTEND[Frontend host]
-    FRONTEND -->|API requests| API[FastAPI service]
+    BROWSER[Browser] -->|HTTPS| FRONTEND[Frontend host]
+    FRONTEND -->|API request| API[FastAPI host]
     API -->|Vector search| BQ[(BigQuery)]
-    API -->|Model calls| VERTEX[Vertex AI and Gemini]
+    API -->|Gemini 3.8 Flash requests| VERTEX[Gemini Enterprise Agent Platform]
     INGEST[Ingestion job] -->|Write chunks| BQ
     INGEST -. Optional files .-> GCS[(Google Cloud Storage)]
 ```
 
-The repository does not specify a production hosting platform. Configure frontend hosting, API hosting, network access, secrets, and `CORS_ORIGINS` for the chosen environment.
+The repository has no production hosting manifests. The API currently has no application-level authentication, so keep it local or behind infrastructure-level access controls. Do not expose it publicly or use real patient data until authentication is implemented and reviewed.
 
 ## Security
 
-- The pipeline screens for common email, phone, and US SSN patterns. This is a basic guardrail, not comprehensive de-identification.
-- Request logging records request metadata and avoids logging patient request bodies.
-- Restrict `CORS_ORIGINS` to the intended frontend origins.
-- Use least-privilege Google Cloud service accounts and a secure secret store in deployment.
-- Authentication and authorization are not implemented in this repository; add them before multi-user deployment.
-- Treat model output as advisory and require qualified clinical review.
+- Length and common direct-identifier checks happen before any model or retrieval call.
+- Urgent screening is deterministic and reads the placeholder warning list in `backend/app/urgent_signs.json`. A trigger prevents all matching model and retrieval calls.
+- Every agent instruction treats the case, trial records, retrieved passages, and chat question as untrusted data. Inputs are JSON-serialized in a separate user message, not interpolated into instructions.
+- ADK agents have no arbitrary tools. Backend-only retrieval validates the query against the case and supported profile facts, filters returned IDs against the configured trial store, and enforces two calls maximum.
+- Structured agent outputs are Pydantic-validated. Trial and patient quotes are checked against source text. Verdicts, ranking, and result caps are controlled by application code.
+- Each model call uses a fresh in-memory session; it is deleted after that call. No server-side chat history or session persistence is configured.
+- Logs avoid patient narratives, extracted facts, queries, prompts, responses, and medical tool payloads. A shared sanitizer logs only request correlation, step, and error category. Framework debug logging is suppressed.
+- No authentication or regulatory compliance is implemented or claimed. The emergency list needs qualified clinician review.
 
 ## Scalability
 
-- BigQuery provides managed storage and vector search. Tune candidate counts and monitor query cost and latency.
-- Workflow concurrency and timeouts are configurable; tune them against model quotas and API capacity.
-- Run ingestion independently from the API and schedule refreshes to keep trial data current.
-- For larger deployments, add rate limits, caching where appropriate, monitoring, and authenticated access.
-- The repository does not include autoscaling or production deployment configuration.
+- Candidate assessment and final-result caps come from configuration; concurrent assessment is bounded by `ADK_CONCURRENCY`.
+- Each model call and retrieval call has a timeout. The matching and chat workflows also have derived overall timeouts capped in code.
+- BigQuery provides managed vector storage and search. Monitor query cost and latency when tuning `CANDIDATES_TO_RETRIEVE`.
+- Ingestion is independent of request handling and can be scheduled externally, but the repository does not include a scheduler or autoscaling configuration.
+- Additional operational needs such as user authentication, access controls, rate limits, monitoring, and deployment automation remain future work.

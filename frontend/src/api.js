@@ -4,6 +4,25 @@
 
 const API_BASE = "";
 
+/**
+ * @typedef {Object} MatchResponse
+ * @property {Object} patient_profile
+ * @property {Array<Object>} matches
+ * @property {string} disclaimer
+ * @property {number} latency_seconds
+ * @property {string|null} [emergency_notice] Present when urgent screening stops matching.
+ * @property {string[]} [missing_key_facts] Plain-language facts absent from the validated profile.
+ * @property {string[]} [conflicting_facts] Conflicts detected in supported case text.
+ */
+
+/**
+ * @typedef {Object} ChatResponse
+ * @property {string} answer
+ * @property {Array<Object>} citations
+ * @property {string|null} missing_info
+ * @property {string|null} session_id Client-provided identifier; not server-side memory.
+ */
+
 async function request(endpoint, options = {}) {
   let response;
 
@@ -45,7 +64,7 @@ async function request(endpoint, options = {}) {
 /**
  * Match a de-identified patient case against clinical trials.
  * @param {string} patientCase
- * @returns {Promise<Object>} MatchResponse
+ * @returns {Promise<MatchResponse>}
  */
 export async function matchPatient(patientCase) {
   if (!patientCase || !patientCase.trim()) {
@@ -67,7 +86,7 @@ export async function matchPatient(patientCase) {
  * @param {Array<string>} params.trialIds
  * @param {string} [params.patientCase]
  * @param {string} [params.sessionId]
- * @returns {Promise<Object>} ChatResponse
+ * @returns {Promise<ChatResponse>}
  */
 export async function askTrialQuestion({
   question,

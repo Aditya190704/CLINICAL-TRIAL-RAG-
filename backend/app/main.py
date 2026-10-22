@@ -20,6 +20,8 @@ from app.schemas import (
     MatchRequest,
     MatchResponse,
 )
+from app.safe_logging import log_safe_error, reset_request_id, set_request_id
+from app.agents.workflow import WorkflowError
 from app.services.chat import chat_answer
 from app.services import pipeline
 from app.services.pipeline import run as run_matching_pipeline
@@ -111,6 +113,7 @@ async def request_logging_middleware(
     )
 
     request.state.request_id = request_id
+    context_token = set_request_id(request_id)
 
     started = time.perf_counter()
     status_code = 500
@@ -124,14 +127,7 @@ async def request_logging_middleware(
         return response
 
     except Exception as exc:
-        logger.error(
-            "Unhandled request failure: method=%s path=%s "
-            "error=%s request_id=%s",
-            request.method,
-            request.url.path,
-            type(exc).__name__,
-            request_id,
-        )
+        log_safe_error(logger, request_id=request_id, step="request", error=exc)
         raise
 
     finally:
@@ -140,15 +136,8 @@ async def request_logging_middleware(
             2,
         )
 
-        logger.info(
-            "Request completed: method=%s path=%s status=%s "
-            "duration_ms=%s request_id=%s",
-            request.method,
-            request.url.path,
-            status_code,
-            elapsed_ms,
-            request_id,
-        )
+        logger.info("request_id=%s step=request_finished status=%s duration_ms=%s", request_id, status_code, elapsed_ms)
+        reset_request_id(context_token)
 
 
 # ---------------------------------------------------------------------
@@ -240,10 +229,7 @@ def readiness():
         }
 
     except Exception as exc:
-        logger.warning(
-            "Readiness check failed (%s).",
-            type(exc).__name__,
-        )
+        log_safe_error(logger, request_id=None, step="readiness", error=exc)
 
         raise HTTPException(
             status_code=503,
@@ -263,7 +249,7 @@ def readiness():
     response_model=MatchResponse,
     tags=["matching"],
 )
-def match(
+async def match(
     req: MatchRequest,
     request: Request,
 ):
@@ -276,7 +262,7 @@ def match(
     )
 
     try:
-        return pipeline.run(req.patient_case)
+        return await pipeline.run_async(req.patient_case, request_id=request_id)
 
     except ValueError as exc:
         raise HTTPException(
@@ -285,11 +271,7 @@ def match(
         ) from exc
 
     except PermissionError as exc:
-        logger.warning(
-            "Matching permission failure: request_id=%s error=%s",
-            request_id,
-            type(exc).__name__,
-        )
+        log_safe_error(logger, request_id=request_id, step="matching_permission", error=exc)
 
         raise HTTPException(
             status_code=503,
@@ -300,24 +282,19 @@ def match(
             ),
         ) from exc
 
+    except WorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
     except RuntimeError as exc:
-        logger.error(
-            "Matching workflow failed: request_id=%s error=%s",
-            request_id,
-            type(exc).__name__,
-        )
+        log_safe_error(logger, request_id=request_id, step="matching", error=exc)
 
         raise HTTPException(
             status_code=500,
-            detail=str(exc),
+            detail="Matching failed. Please try again later.",
         ) from exc
 
     except Exception as exc:
-        logger.error(
-            "Unexpected matching failure: request_id=%s error=%s",
-            request_id,
-            type(exc).__name__,
-        )
+        log_safe_error(logger, request_id=request_id, step="matching", error=exc)
 
         raise HTTPException(
             status_code=500,
@@ -334,7 +311,7 @@ def match(
     response_model=ChatResponse,
     tags=["chat"],
 )
-def trial_chat(
+async def trial_chat(
     req: ChatRequest,
     request: Request,
 ):
@@ -347,53 +324,9 @@ def trial_chat(
     )
 
     try:
-        available_trials = trials()
-
-        known_ids = {
-            str(item.get("nct_id", "")).strip().upper()
-            for item in available_trials
-            if item.get("nct_id")
-        }
-
-        # Normalize and remove duplicate trial identifiers.
-        selected_ids = list(
-            dict.fromkeys(
-                str(trial_id).strip().upper()
-                for trial_id in req.trial_ids
-                if str(trial_id).strip()
-            )
-        )
-
-        if not selected_ids:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Select at least one trial before "
-                    "asking a question."
-                ),
-            )
-
-        unknown_ids = [
-            trial_id
-            for trial_id in selected_ids
-            if trial_id not in known_ids
-        ]
-
-        if unknown_ids:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "message": (
-                        "One or more selected trials "
-                        "are not available."
-                    ),
-                    "unknown_trial_ids": unknown_ids,
-                },
-            )
-
-        result = chat_answer(
+        result = await chat_answer(
             question=req.question,
-            trial_ids=selected_ids,
+            trial_ids=req.trial_ids,
             patient_case=req.patient_case,
         )
 
@@ -412,11 +345,7 @@ def trial_chat(
         ) from exc
 
     except PermissionError as exc:
-        logger.warning(
-            "Chat permission failure: request_id=%s error=%s",
-            request_id,
-            type(exc).__name__,
-        )
+        log_safe_error(logger, request_id=request_id, step="chat_permission", error=exc)
 
         raise HTTPException(
             status_code=503,
@@ -428,11 +357,7 @@ def trial_chat(
         ) from exc
 
     except RuntimeError as exc:
-        logger.error(
-            "Chat failed: request_id=%s error=%s",
-            request_id,
-            type(exc).__name__,
-        )
+        log_safe_error(logger, request_id=request_id, step="chat", error=exc)
 
         raise HTTPException(
             status_code=500,
@@ -443,11 +368,7 @@ def trial_chat(
         ) from exc
 
     except Exception as exc:
-        logger.error(
-            "Unexpected chat failure: request_id=%s error=%s",
-            request_id,
-            type(exc).__name__,
-        )
+        log_safe_error(logger, request_id=request_id, step="chat", error=exc)
 
         raise HTTPException(
             status_code=500,
