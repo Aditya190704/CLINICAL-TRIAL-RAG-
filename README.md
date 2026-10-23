@@ -123,15 +123,15 @@ The backend loads `backend/.env` and process environment variables. Never commit
 |---|---|---|
 | `GCP_PROJECT` | Example project in `.env.example` | Google Cloud project ID. |
 | `GCP_LOCATION` | `us-central1` | Vertex AI embeddings region and BigQuery location fallback. |
-| `GEMINI_LOCATION` | `global` | Gemini serving location. Gemini 3.8 Flash uses the global endpoint. |
+| `GEMINI_LOCATION` | `global` | Gemini serving location. |
 | `BIGQUERY_DATASET` | `clinical_trials` | Dataset containing trial chunks. |
 | `BIGQUERY_CHUNKS_TABLE` | `trial_chunks` | Table containing chunks and embeddings. |
 | `BIGQUERY_LOCATION` | `us-central1` | Optional explicit BigQuery job location. |
 | `EMBEDDING_MODEL` | `text-embedding-005` | Embedding model name. |
 | `EMBEDDING_DIM` | `768` | Expected vector dimension. |
 | `GEMINI_MODEL` | `gemini-2.5-flash` | ADK model used for extraction, criteria assessment, and chat. |
-| `CANDIDATES_TO_RETRIEVE` | `20` | BigQuery retrieval chunk limit. |
-| `CANDIDATES_TO_JUDGE` | `6` | Assessment count setting, with a hard application cap of 10. |
+| `CANDIDATES_TO_RETRIEVE` | `40` | BigQuery retrieval chunk limit. |
+| `CANDIDATES_TO_JUDGE` | `10` | Assessment count setting, with a hard application cap of 10. |
 | `TOP_K_RESULTS` | `3` | Maximum non-excluded shortlist results; hard application cap of 3. |
 | `ADK_CONCURRENCY` | `6` | Maximum concurrent criteria assessments. |
 | `ADK_TIMEOUT_SECONDS` | `60.0` | Per-agent and retrieval-call timeout; overall matching and chat timeouts are derived from this value and capped in code. |
