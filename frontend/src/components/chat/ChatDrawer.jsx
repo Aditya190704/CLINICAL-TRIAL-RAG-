@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import Button from "../ui/Button";
-import { askTrialQuestion } from "../../api";
+import { askTrialQuestion, clearRemoteChat } from "../../api";
 import { deduplicateCitations } from "../../utils/deduplication";
 
 const SUGGESTED_QUESTIONS = [
@@ -132,11 +132,14 @@ export default function ChatDrawer({
     setError("");
 
     try {
+      const messageId = globalThis.crypto?.randomUUID?.()
+        || `turn_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
       const data = await askTrialQuestion({
         question: q,
         trialIds,
         patientCase,
         sessionId,
+        messageId,
       });
 
       const newTurn = {
@@ -172,10 +175,15 @@ export default function ChatDrawer({
     setTimeout(() => setCopiedIndex(null), 2000);
   };
 
-  const handleClearHistory = () => {
+  const handleClearHistory = async () => {
     if (chatHistory.length > 0) {
-      onUpdateHistory([]);
-      if (onShowToast) onShowToast("Chat conversation cleared", "info");
+      try {
+        await clearRemoteChat(sessionId);
+        onUpdateHistory([]);
+        if (onShowToast) onShowToast("Chat conversation cleared", "info");
+      } catch (clearError) {
+        setError(clearError?.message || "Could not clear saved chat history.");
+      }
     }
   };
 

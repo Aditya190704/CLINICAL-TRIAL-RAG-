@@ -14,6 +14,8 @@ export default function Header({
   onLoadSample,
   hasResults = false,
   onOpenChat,
+  displayName = "",
+  onLogout,
 }) {
   return (
     <header className="app-header">
@@ -50,6 +52,7 @@ export default function Header({
       </div>
 
       <div className="header-right">
+        {displayName && <span className="signed-in-label">{displayName}</span>}
         {onLoadSample && (
           <Button
             variant="ghost"
@@ -84,6 +87,12 @@ export default function Header({
         >
           New Match
         </Button>
+
+        {onLogout && (
+          <Button variant="ghost" size="sm" onClick={onLogout} title="Sign out and clear this user's workspace">
+            Sign out
+          </Button>
+        )}
 
         {/* Sidebar Toggle Button with Session Count Badge */}
         <button

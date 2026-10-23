@@ -1,0 +1,10 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // All application Firestore access goes through FastAPI's Admin SDK.
+    // Client SDK access is denied; API routes enforce identity and ownership.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

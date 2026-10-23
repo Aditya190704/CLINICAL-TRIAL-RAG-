@@ -9,16 +9,20 @@ import time
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.schemas import (
     ChatRequest,
     ChatResponse,
     MatchRequest,
     MatchResponse,
+    SessionCreateRequest,
+    SessionRenameRequest,
+    ProfileInitializeRequest,
 )
 from app.safe_logging import log_safe_error, reset_request_id, set_request_id
 from app.agents.workflow import WorkflowError
@@ -26,6 +30,8 @@ from app.services.chat import chat_answer
 from app.services import pipeline
 from app.services.pipeline import run as run_matching_pipeline
 from app.services.trial_store import trials
+from app.services.auth_dependency import require_firebase_user
+from app.services import user_data
 
 
 # ---------------------------------------------------------------------
@@ -94,7 +100,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins(),
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["X-Request-ID"],
 )
@@ -252,6 +258,7 @@ def readiness():
 async def match(
     req: MatchRequest,
     request: Request,
+    user: dict = Depends(require_firebase_user),
 ):
     """Match an anonymized patient case against processed clinical trials."""
 
@@ -262,7 +269,28 @@ async def match(
     )
 
     try:
-        return await pipeline.run_async(req.patient_case, request_id=request_id)
+        session_id = req.session_id
+        if session_id:
+            session = await run_in_threadpool(user_data.get_session, user["uid"], session_id)
+            if session is None:
+                raise HTTPException(status_code=403, detail="This matching session is not accessible.")
+        else:
+            session = await run_in_threadpool(user_data.create_session, user["uid"])
+            session_id = session["id"]
+
+        result = await pipeline.run_async(req.patient_case, request_id=request_id)
+        saved = await run_in_threadpool(
+            user_data.save_match_result,
+            user["uid"],
+            session_id,
+            result.model_dump(mode="json"),
+        )
+        if not saved:
+            raise HTTPException(status_code=403, detail="This matching session is not accessible.")
+        return result.model_copy(update={"session_id": session_id})
+
+    except HTTPException:
+        raise
 
     except ValueError as exc:
         raise HTTPException(
@@ -314,6 +342,7 @@ async def match(
 async def trial_chat(
     req: ChatRequest,
     request: Request,
+    user: dict = Depends(require_firebase_user),
 ):
     """Answer a question using evidence from the selected trials."""
 
@@ -324,15 +353,41 @@ async def trial_chat(
     )
 
     try:
+        if not req.session_id:
+            raise HTTPException(status_code=400, detail="A saved matching session is required for chat.")
+        session = await run_in_threadpool(user_data.get_session, user["uid"], req.session_id)
+        if session is None:
+            raise HTTPException(status_code=403, detail="This matching session is not accessible.")
+        owned_trial_ids = set(session.get("matchedTrialIds") or [])
+        if not req.trial_ids or any(trial_id not in owned_trial_ids for trial_id in req.trial_ids):
+            raise HTTPException(status_code=403, detail="One or more trials are outside this matching session.")
+        message_id = req.message_id or uuid4().hex
+        existing_turn = await run_in_threadpool(
+            user_data.load_chat_turn, user["uid"], req.session_id, message_id
+        )
+        if existing_turn is not None:
+            return ChatResponse.model_validate({
+                "answer": existing_turn["answer"],
+                "citations": existing_turn["citations"],
+                "missing_info": None,
+                "session_id": req.session_id,
+            })
         result = await chat_answer(
             question=req.question,
             trial_ids=req.trial_ids,
-            patient_case=req.patient_case,
         )
-
-        # Preserve the frontend's chat-session state.
+        persisted = await run_in_threadpool(
+            user_data.persist_chat_turn,
+            user["uid"],
+            req.session_id,
+            message_id,
+            req.question,
+            result["answer"],
+            [citation.model_dump(mode="json") for citation in result.get("citations", [])],
+        )
+        if not persisted:
+            raise HTTPException(status_code=403, detail="This matching session is not accessible.")
         result["session_id"] = req.session_id
-
         return ChatResponse.model_validate(result)
 
     except HTTPException:
@@ -346,35 +401,114 @@ async def trial_chat(
 
     except PermissionError as exc:
         log_safe_error(logger, request_id=request_id, step="chat_permission", error=exc)
-
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "A required service is unavailable "
-                "or access is not configured. "
-                "Check BigQuery IAM permissions and service credentials."
-            ),
-        ) from exc
+        raise HTTPException(status_code=503, detail="A required evidence service is unavailable or access is not configured.") from exc
 
     except RuntimeError as exc:
         log_safe_error(logger, request_id=request_id, step="chat", error=exc)
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "The trial evidence service failed. "
-                "Please try again later."
-            ),
-        ) from exc
+        raise HTTPException(status_code=500, detail="The trial evidence service failed. Please try again later.") from exc
 
     except Exception as exc:
         log_safe_error(logger, request_id=request_id, step="chat", error=exc)
+        raise HTTPException(status_code=500, detail="The chat request failed. Please try again later.") from exc
 
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "The chat request failed. "
-                "Please try again later."
-            ),
-        ) from exc
+
+def _profile_or_service_error(user: dict) -> dict:
+    try:
+        return user_data.get_or_create_profile(user["uid"], user["email"], user["display_name"])
+    except Exception as exc:
+        log_safe_error(logger, request_id=None, step="profile_store", error=exc)
+        raise HTTPException(status_code=503, detail="User profile storage is unavailable.") from exc
+
+
+@app.get("/api/auth/profile", tags=["authentication"])
+async def auth_profile(user: dict = Depends(require_firebase_user)):
+    return await run_in_threadpool(_profile_or_service_error, user)
+
+
+@app.post("/api/auth/profile", tags=["authentication"])
+async def initialize_auth_profile(
+    payload: ProfileInitializeRequest,
+    user: dict = Depends(require_firebase_user),
+):
+    try:
+        return await run_in_threadpool(
+            user_data.initialize_profile,
+            user["uid"],
+            user["email"],
+            payload.display_name,
+        )
+    except Exception as exc:
+        log_safe_error(logger, request_id=None, step="profile_initialize", error=exc)
+        raise HTTPException(status_code=503, detail="User profile storage is unavailable.") from exc
+
+
+@app.get("/api/sessions", tags=["sessions"])
+async def get_sessions(user: dict = Depends(require_firebase_user)):
+    try:
+        return await run_in_threadpool(user_data.list_sessions, user["uid"])
+    except Exception as exc:
+        log_safe_error(logger, request_id=None, step="session_list", error=exc)
+        raise HTTPException(status_code=503, detail="Session storage is unavailable.") from exc
+
+
+@app.post("/api/sessions", tags=["sessions"])
+async def post_session(
+    payload: SessionCreateRequest,
+    user: dict = Depends(require_firebase_user),
+):
+    try:
+        return await run_in_threadpool(user_data.create_session, user["uid"], payload.title)
+    except Exception as exc:
+        log_safe_error(logger, request_id=None, step="session_create", error=exc)
+        raise HTTPException(status_code=503, detail="Session storage is unavailable.") from exc
+
+
+@app.get("/api/sessions/{session_id}", tags=["sessions"])
+async def get_session(session_id: str, user: dict = Depends(require_firebase_user)):
+    session = await run_in_threadpool(user_data.get_session, user["uid"], session_id)
+    if session is None:
+        raise HTTPException(status_code=403, detail="This matching session is not accessible.")
+    return session
+
+
+@app.patch("/api/sessions/{session_id}", tags=["sessions"])
+async def patch_session(
+    session_id: str,
+    payload: SessionRenameRequest,
+    user: dict = Depends(require_firebase_user),
+):
+    updated = await run_in_threadpool(user_data.update_session_title, user["uid"], session_id, payload.title)
+    if not updated:
+        raise HTTPException(status_code=403, detail="This matching session is not accessible.")
+    return {"id": session_id, "title": payload.title}
+
+
+@app.delete("/api/sessions/{session_id}/messages", tags=["sessions"])
+async def delete_session_messages(session_id: str, user: dict = Depends(require_firebase_user)):
+    deleted = await run_in_threadpool(user_data.clear_chat_messages, user["uid"], session_id)
+    if not deleted:
+        raise HTTPException(status_code=403, detail="This matching session is not accessible.")
+    return {"status": "cleared"}
+
+
+@app.delete("/api/sessions/{session_id}/result", tags=["sessions"])
+async def delete_session_result(session_id: str, user: dict = Depends(require_firebase_user)):
+    cleared = await run_in_threadpool(user_data.clear_match_result, user["uid"], session_id)
+    if not cleared:
+        raise HTTPException(status_code=403, detail="This matching session is not accessible.")
+    return {"status": "cleared"}
+
+
+@app.delete("/api/sessions/{session_id}", tags=["sessions"])
+async def delete_one_session(session_id: str, user: dict = Depends(require_firebase_user)):
+    deleted = await run_in_threadpool(user_data.delete_session, user["uid"], session_id)
+    if not deleted:
+        raise HTTPException(status_code=403, detail="This matching session is not accessible.")
+    return {"status": "deleted"}
+
+
+@app.delete("/api/sessions", tags=["sessions"])
+async def delete_all_sessions(user: dict = Depends(require_firebase_user)):
+    await run_in_threadpool(user_data.clear_sessions, user["uid"])
+    return {"status": "cleared"}
 

@@ -28,6 +28,10 @@ class Settings(BaseSettings):
         default="",
         validation_alias="GCP_PROJECT",
     )
+    firebase_project_id: str = Field(
+        default="",
+        validation_alias="FIREBASE_PROJECT_ID",
+    )
     gcp_location: str = Field(
         default="us-central1",
         validation_alias="GCP_LOCATION",

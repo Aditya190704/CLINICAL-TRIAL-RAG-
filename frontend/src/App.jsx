@@ -12,9 +12,11 @@ import Toast from "./components/ui/Toast";
 import Button from "./components/ui/Button";
 import { SkeletonCard } from "./components/ui/Skeleton";
 
-import { matchPatient, checkHealth } from "./api";
+import { matchPatient, checkHealth, clearRemoteResult } from "./api";
 import { useSessionManager } from "./hooks/useSessionManager";
 import { useToast } from "./hooks/useToast";
+import { useAuth } from "./auth/AuthContext";
+import AuthScreen from "./auth/AuthScreen";
 
 const SAMPLE_CASE = `62-year-old woman with newly diagnosed stage IIIB non-small cell lung cancer, adenocarcinoma, EGFR exon 19 deletion positive, PD-L1 40%. ECOG performance status 1. Past medical history: type 2 diabetes controlled on metformin, hypertension on lisinopril. No prior systemic chemotherapy or radiotherapy. Brain MRI shows no metastases. Creatinine 0.9 mg/dL, ALT within normal limits. Never smoker. No history of interstitial lung disease.`;
 
@@ -25,7 +27,7 @@ const MATCH_STEPS = [
   "Verifying verbatim quotes & computing final verdicts",
 ];
 
-export default function App() {
+function ClinicalWorkspace({ authUser, onLogout }) {
   const {
     sessions,
     activeSessionId,
@@ -36,7 +38,9 @@ export default function App() {
     renameSession,
     deleteSession,
     clearAllSessions,
-  } = useSessionManager();
+    loading: sessionsLoading,
+    error: sessionsError,
+  } = useSessionManager(authUser);
 
   const { toast, showToast, hideToast } = useToast();
 
@@ -107,7 +111,8 @@ export default function App() {
     setError("");
 
     try {
-      const result = await matchPatient(cleanCase);
+      if (!activeSessionId) throw new Error("Your session is still loading. Please try again.");
+      const result = await matchPatient(cleanCase, activeSessionId);
 
       if (!result || !Array.isArray(result.matches)) {
         throw new Error("Invalid response format received from matching service.");
@@ -153,8 +158,15 @@ export default function App() {
     showToast("Loaded sample NSCLC clinical case", "info");
   };
 
-  const handleClearCase = () => {
+  const handleClearCase = async () => {
     setPatientText("");
+    if (activeSessionId) {
+      try {
+        await clearRemoteResult(activeSessionId);
+      } catch (clearError) {
+        showToast(clearError.message || "Could not clear the saved result.", "error");
+      }
+    }
     updateActiveSession({ patientCase: "", data: null });
   };
 
@@ -204,12 +216,15 @@ export default function App() {
           isSidebarOpen={isSidebarOpen}
           onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
           onNewSession={() => {
-            createNewSession();
-            showToast("Started a new patient matching session", "info");
+            createNewSession()
+              .then(() => showToast("Started a new patient matching session", "info"))
+              .catch((err) => showToast(err.message || "Could not start a session.", "error"));
           }}
           onLoadSample={handleLoadSample}
           hasResults={currentMatches.length > 0}
           onOpenChat={() => setIsChatOpen(true)}
+          displayName={authUser.profile.displayName || authUser.firebaseUser.email}
+          onLogout={onLogout}
         />
       }
       sidebar={
@@ -223,8 +238,9 @@ export default function App() {
             showToast("Loaded session", "info");
           }}
           onNewSession={() => {
-            createNewSession();
-            showToast("Started a new session", "info");
+            createNewSession()
+              .then(() => showToast("Started a new session", "info"))
+              .catch((err) => showToast(err.message || "Could not start a session.", "error"));
           }}
           onRenameSession={(id, title) => {
             renameSession(id, title);
@@ -244,6 +260,8 @@ export default function App() {
     >
       {/* ── Main Input Card ── */}
       <section className="input-panel-section">
+        {sessionsLoading && <div className="session-loading-note" role="status">Loading your secure sessions…</div>}
+        {sessionsError && <div className="auth-alert" role="alert">{sessionsError}</div>}
         <div className="section-header-row">
           <div>
             <span className="section-eyebrow">PATIENT CASE INTAKE</span>
@@ -263,7 +281,7 @@ export default function App() {
             >
               Use Sample Case
             </Button>
-            {patientText && (
+            {(patientText || currentData) && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -309,7 +327,7 @@ export default function App() {
               variant="primary"
               size="lg"
               type="submit"
-              disabled={loading || patientText.trim().length < 40}
+              disabled={loading || sessionsLoading || !activeSessionId || patientText.trim().length < 40}
               loading={loading}
               icon="🔍"
               title="Run vector retrieval and Gemini eligibility judge"
@@ -512,5 +530,20 @@ export default function App() {
       {/* ── Floating Toast ── */}
       <Toast toast={toast} onDismiss={hideToast} />
     </AppShell>
+  );
+}
+
+export default function App() {
+  const { user, loading, signOut } = useAuth();
+  if (loading) {
+    return <main className="auth-page"><div className="auth-loading" role="status">Loading secure workspace…</div></main>;
+  }
+  if (!user) return <AuthScreen />;
+  return (
+    <ClinicalWorkspace
+      key={user.firebaseUser.uid}
+      authUser={user}
+      onLogout={async () => { await signOut(); }}
+    />
   );
 }

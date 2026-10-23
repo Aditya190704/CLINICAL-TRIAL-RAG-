@@ -2,7 +2,9 @@
  * API service for communicating with the FastAPI backend.
  */
 
-const API_BASE = "";
+import { auth } from "./firebase";
+
+export const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 /**
  * @typedef {Object} MatchResponse
@@ -33,6 +35,9 @@ async function request(endpoint, options = {}) {
       ...options,
       headers: {
         "Content-Type": "application/json",
+        ...(auth?.currentUser
+          ? { Authorization: `Bearer ${await auth.currentUser.getIdToken()}` }
+          : {}),
         ...options.headers,
       },
     });
@@ -68,7 +73,7 @@ async function request(endpoint, options = {}) {
  * @param {string} patientCase
  * @returns {Promise<MatchResponse>}
  */
-export async function matchPatient(patientCase) {
+export async function matchPatient(patientCase, sessionId) {
   if (!patientCase || !patientCase.trim()) {
     throw new Error("Please enter a patient case before matching trials.");
   }
@@ -77,6 +82,7 @@ export async function matchPatient(patientCase) {
     method: "POST",
     body: JSON.stringify({
       patient_case: patientCase.trim(),
+      session_id: sessionId || null,
     }),
   });
 }
@@ -95,6 +101,7 @@ export async function askTrialQuestion({
   trialIds,
   patientCase = null,
   sessionId = null,
+  messageId = null,
 }) {
   if (!question || !question.trim()) {
     throw new Error("Please enter a question.");
@@ -109,8 +116,8 @@ export async function askTrialQuestion({
     body: JSON.stringify({
       question: question.trim(),
       trial_ids: trialIds,
-      patient_case: patientCase ? patientCase.trim() : null,
       session_id: sessionId || null,
+      message_id: messageId || null,
     }),
   });
 }
@@ -127,8 +134,62 @@ export async function checkHealth() {
   }
 }
 
+export async function initializeProfile(displayName) {
+  return request("/api/auth/profile", {
+    method: "POST",
+    body: JSON.stringify({ display_name: displayName }),
+  });
+}
+
+export async function listSessions() {
+  return request("/api/sessions", { method: "GET" });
+}
+
+export async function createSession(title = "New Patient Session") {
+  return request("/api/sessions", {
+    method: "POST",
+    body: JSON.stringify({ title }),
+  });
+}
+
+export async function getSession(sessionId) {
+  return request(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "GET" });
+}
+
+export async function renameRemoteSession(sessionId, title) {
+  return request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
+}
+
+export async function deleteRemoteSession(sessionId) {
+  return request(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+}
+
+export async function clearRemoteSessions() {
+  return request("/api/sessions", { method: "DELETE" });
+}
+
+export async function clearRemoteChat(sessionId) {
+  return request(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, { method: "DELETE" });
+}
+
+export async function clearRemoteResult(sessionId) {
+  return request(`/api/sessions/${encodeURIComponent(sessionId)}/result`, { method: "DELETE" });
+}
+
 export default {
   matchPatient,
   askTrialQuestion,
   checkHealth,
+  initializeProfile,
+  listSessions,
+  createSession,
+  getSession,
+  renameRemoteSession,
+  deleteRemoteSession,
+  clearRemoteSessions,
+  clearRemoteChat,
+  clearRemoteResult,
 };

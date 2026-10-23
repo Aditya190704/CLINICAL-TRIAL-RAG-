@@ -57,6 +57,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for Mermaid flowcharts, sequence, data, a
 | Area | Technologies |
 |---|---|
 | Frontend | React 18, Vite |
+| Authentication and persistence | Firebase Authentication, Cloud Firestore |
 | API | Python, FastAPI, Pydantic |
 | Model orchestration | Google ADK `2.11.0`, Google Gen AI |
 | Language model | Gemini 2.5 Flash via Gemini Enterprise Agent Platform |
@@ -65,7 +66,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for Mermaid flowcharts, sequence, data, a
 | Optional object storage | Google Cloud Storage |
 | Tests | pytest |
 
-The ADK dependency is pinned to the version installed and inspected for this implementation. Other dependencies were not changed for this workflow update.
+The ADK dependency is pinned to the version installed and inspected for this implementation.
 
 ## Prerequisites
 
@@ -73,6 +74,7 @@ The ADK dependency is pinned to the version installed and inspected for this imp
 - Node.js 18 or later and npm.
 - Google Cloud project with Vertex AI and BigQuery access.
 - Google Cloud credentials with permission to call the selected models and query/write the configured dataset.
+- Firebase project with Email/Password Authentication enabled and Cloud Firestore created.
 
 ## Installation
 
@@ -93,6 +95,8 @@ Edit `backend/.env` for your own Google Cloud project and dataset. Authenticate 
 gcloud auth application-default login
 gcloud config set project YOUR_PROJECT_ID
 ```
+
+For Firebase, set `FIREBASE_PROJECT_ID` in `backend/.env` to your Firebase project ID. The backend uses Application Default Credentials with Firebase Admin, so the local ADC identity and deployed service account need Firestore access. Copy `frontend/.env.example` to `frontend/.env` and set the Firebase web app values from Firebase Console. Enable **Email/Password** under Authentication sign-in providers. Deploy [`firestore.rules`](firestore.rules); these rules deny direct browser database access because all reads and writes use authenticated FastAPI routes.
 
 Prepare and ingest trial data from `backend/`:
 
@@ -139,6 +143,7 @@ The backend loads `backend/.env` and process environment variables. Never commit
 | `GCS_BUCKET` | Empty or configured bucket | Optional bucket for processed JSON. |
 | `GCS_PREFIX` | `clinical-trials` | Optional object prefix. |
 | `CORS_ORIGINS` | Local Vite origins | Comma-separated allowed frontend origins. |
+| `FIREBASE_PROJECT_ID` | Firebase project ID | Firebase Admin token verification and Firestore project. |
 | `LOG_LEVEL` | `INFO` | Application log level. Keep framework debug logging disabled. |
 | `PROCESSED_DIR` | `<backend>/data/processed` | Optional processed-data path override. |
 | `RAW_DIR` | `<backend>/data/raw` | Optional raw-data path override. |

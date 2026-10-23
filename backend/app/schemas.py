@@ -28,6 +28,7 @@ class MatchRequest(APIModel):
         max_length=8000,
         description="An anonymised patient case, between 40 and 8000 characters.",
     )
+    session_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     @field_validator("patient_case")
     @classmethod
@@ -246,6 +247,7 @@ class MatchResponse(APIModel):
 
 
     latency_seconds: float = Field(default=0, ge=0)
+    session_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +277,7 @@ class ChatRequest(APIModel):
         default=None,
         max_length=200,
     )
+    message_id: str | None = Field(default=None, max_length=128)
 
     @field_validator("question")
     @classmethod
@@ -326,6 +329,44 @@ class ChatRequest(APIModel):
 
         value = value.strip()
         return value or None
+
+    @field_validator("message_id")
+    @classmethod
+    def validate_message_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if value and (len(value) > 128 or not all(char.isalnum() or char in "_-" for char in value)):
+            raise ValueError("Message ID contains unsupported characters.")
+        return value or None
+
+
+class SessionCreateRequest(APIModel):
+    title: str = Field(default="New Patient Session", min_length=1, max_length=100)
+
+
+class SessionRenameRequest(APIModel):
+    title: str = Field(min_length=1, max_length=100)
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Session title must not be blank.")
+        return value
+
+
+class ProfileInitializeRequest(APIModel):
+    display_name: str = Field(min_length=1, max_length=100)
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Name must not be blank.")
+        return value
 
 
 # ---------------------------------------------------------------------------
