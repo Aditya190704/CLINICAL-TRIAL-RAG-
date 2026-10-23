@@ -1,0 +1,5 @@
+timestamp_utc,level,error_code,stage,trial_id,exception_type,user_message,technical_details
+2026-10-21T08:44:35.877837+00:00,ERROR,PATIENT_PARSE_FAILED,patient_parsing,,RuntimeError,We couldn't understand the patient case. Please review the details and try again.,Patient profile extraction failed. Please try again later.
+2026-10-21T09:27:03.407251+00:00,ERROR,PATIENT_PARSE_FAILED,patient_parsing,,RuntimeError,We couldn't understand the patient case. Please review the details and try again.,Patient profile extraction failed. Please try again later.
+2026-10-21T09:28:26.992268+00:00,ERROR,PATIENT_PARSE_FAILED,patient_parsing,,RuntimeError,We couldn't understand the patient case. Please review the details and try again.,Patient profile extraction failed. Please try again later.
+2026-10-21T09:32:45.830882+00:00,ERROR,PATIENT_PARSE_FAILED,patient_parsing,,RuntimeError,We couldn't understand the patient case. Please review the details and try again.,Patient profile extraction failed. Please try again later.
