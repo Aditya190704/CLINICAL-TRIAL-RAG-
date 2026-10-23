@@ -34,9 +34,14 @@ def _validate_profile(profile: PatientProfile, patient_case: str) -> PatientProf
         or re.match(r"(?:age|aged)\s*\d", match.group(0), re.I)
     ]
     age_values = list(dict.fromkeys(int(match.group(1)) for match in explicit_ages))
-    # The case is the source of truth; never let a model hallucinated age
-    # leak into the profile or the session sidebar.
-    profile.age_years = float(age_values[0]) if len(age_values) == 1 else None
+    # Keep the extracted age only when the model's value agrees with the case.
+    # A validator should discard unsupported model output, not invent a new fact.
+    if (
+        len(age_values) != 1
+        or profile.age_years is None
+        or int(profile.age_years) != age_values[0]
+    ):
+        profile.age_years = None
 
     stated_sexes = {
         value.upper()
@@ -62,7 +67,16 @@ def _validate_profile(profile: PatientProfile, patient_case: str) -> PatientProf
             ],
         )
 
-    # A stable query derived from the sanitized case avoids model paraphrases
-    # changing retrieval between otherwise identical runs.
-    profile.search_query = remove_instruction_like_clauses(patient_case)[:MAX_SEARCH_QUERY_LENGTH]
+    # Build a stable query from validated diagnoses and clinically relevant
+    # findings/treatments. Raw case prose can include irrelevant details.
+    query_facts = list(dict.fromkeys([
+        *profile.primary_conditions,
+        *profile.key_findings,
+        *profile.prior_treatments,
+        *profile.current_medications,
+    ]))
+    profile.search_query = (
+        " ".join(query_facts)
+        or remove_instruction_like_clauses(patient_case)
+    )[:MAX_SEARCH_QUERY_LENGTH]
     return profile

@@ -48,7 +48,7 @@ Ingestion writes searchable chunks before runtime. The API applies safety checks
 | `agents/adk_runtime.py` | Creates one ADK `LlmAgent` and ephemeral in-memory session per model task; enforces per-call timeout and deletes the session. |
 | `agents/tasks.py` | Focused extraction, criteria-assessment, and follow-up chat agents. |
 | `agents/tools.py` | Validated retrieval request and request-local two-call budget around the existing retrieval service. |
-| `agents/workflow.py` | Extraction, one deterministic retrieval, candidate validation, serial capped assessment, deterministic verdict and similarity ranking. |
+| `agents/workflow.py` | Extraction, one evidence-driven optional refinement, candidate validation, bounded concurrent assessment, verdict-based shortlist and ruled-out results. |
 | `services/eligibility_judge.py` | Verifies model quotes and computes conservative verdicts in ordinary code. |
 | `services/chat.py` | Retrieves evidence for validated selected trial IDs and returns citations. |
 | `services/trial_store.py` | Loads configured processed trial and passage data. |
@@ -77,23 +77,31 @@ sequenceDiagram
         Safety->>WF: Start workflow
         WF->>ADK: Extract facts and uncertainty
         ADK-->>WF: Pydantic-validated profile
-        WF->>WF: Build sanitized deterministic query
-        WF->>Tool: One case-grounded query
+        WF->>WF: Build query from validated diagnoses and relevant facts
+        WF->>Tool: Initial case-grounded retrieval
         Tool->>BQ: Search configured trial chunks
         BQ-->>Tool: Candidate passages
         Tool-->>WF: Candidate list
-        loop Each candidate in stable order
-            WF->>ADK: Assess one trial
-            ADK-->>WF: Criterion evidence
-            WF->>WF: Verify quotes and compute verdict
+        opt No candidates or best similarity below 0.35
+            WF->>ADK: Propose one profile-grounded query
+            ADK-->>WF: At most one refinement proposal
+            WF->>Tool: Optional second retrieval (only if query adds a supported term)
+            Tool->>BQ: Search configured trial chunks
         end
-        WF->>WF: Rank by similarity; NCT ID breaks ties
+        par Up to configured assessment concurrency
+            WF->>ADK: Assess capped candidate set
+            ADK-->>WF: Criterion evidence
+        end
+        WF->>WF: Verify quotes and compute verdicts
+        WF->>WF: Rank non-excluded trials; collect verified exclusions separately
         WF-->>API: MatchResponse
         API-->>UI: Results and disclaimer
     end
 ```
 
-There is exactly one retrieval query per match request. The same case produces the same sanitized query. Trial assessments run serially; a provider failure stops the loop before any later trial is sent. Assessment failures become API errors and do not produce fallback matches.
+Each match request makes one initial retrieval and can make at most one refinement retrieval. Refinement is considered only when the initial search returns no valid candidates or its best cosine similarity is below `0.35`. The proposed query must contain only tokens from the validated profile and add at least one token to the initial query. The backend enforces a two-call retrieval budget.
+
+Candidates are deduplicated by canonical NCT ID and limited to `min(CANDIDATES_TO_JUDGE, 10)` (six by default). Independent assessments run concurrently up to `ADK_CONCURRENCY` (six by default). On failure or overall timeout, outstanding tasks are cancelled and awaited for cleanup. The primary shortlist contains up to three non-excluded trials. Verified blockers go to `ruled_out_trials` with the criterion-based reason. Similarity is only a tie-breaker after verdict and unresolved-criterion count. The current conservative calculator does not claim likely eligibility: verified blockers produce `EXCLUDED`; some supported evidence without blockers produces `POSSIBLY_ELIGIBLE`; when no criterion has supported evidence, the result is `COULD_NOT_ASSESS`. An assessed subset cannot prove every requirement is met.
 
 ## Business Logic
 
@@ -104,21 +112,22 @@ flowchart TD
     VALID -->|Yes| URGENT{Warning phrase not negated?}
     URGENT -->|Yes| NOTICE[Emergency notice and empty results]
     URGENT -->|No| EXTRACT[ADK fact extraction]
-    EXTRACT --> SANITIZE[Remove instruction-like clauses]
-    SANITIZE --> SEARCH[One deterministic case query]
-    SEARCH --> COUNT{Usable candidates}
-    COUNT -->|0| EMPTY[Return no candidates and uncertainty]
-    COUNT -->|One or more| ORDER[Sort by similarity and NCT ID]
-    ORDER --> ASSESS[Serially assess configured candidate cap]
+    EXTRACT --> SANITIZE[Keep only supported facts and remove instructions]
+    SANITIZE --> SEARCH[Initial query from validated diagnoses and treatment/findings]
+    SEARCH --> QUALITY{No candidates or best similarity < 0.35?}
+    QUALITY -->|Yes| REFINE[At most one validated refinement]
+    QUALITY -->|No| CAP[Deduplicate and cap candidates]
+    REFINE --> CAP
+    CAP --> ASSESS[Concurrent bounded criteria assessment]
     ASSESS --> VERIFY[Verify source quotes]
     VERIFY --> BLOCK{Verified blocking criterion?}
-    BLOCK -->|Yes| EXCLUDED[EXCLUDED for review]
-    BLOCK -->|No| POSSIBLE[POSSIBLY_ELIGIBLE]
-    EXCLUDED --> RANK[Return in stable similarity order]
+    BLOCK -->|Yes| EXCLUDED[Ruled out with verified reason]
+    BLOCK -->|No| POSSIBLE[Possibly eligible or unresolved]
+    EXCLUDED --> RANK[Rank non-excluded by verdict, unknown count, similarity, NCT ID]
     POSSIBLE --> RANK
 ```
 
-Missing evidence maps to the existing `UNKNOWN` criterion state, shown in the UI as “Could not assess.” It never establishes eligibility. A verified blocker yields `EXCLUDED`; every other assessment remains `POSSIBLY_ELIGIBLE`. An empty result set describes only the search performed and does not mean no suitable trial exists.
+Missing evidence maps to the `UNKNOWN` criterion state, shown in the UI as “Could not assess.” It never establishes eligibility. Conflicting age and stage mentions are reported and removed from the judge's evidence input; they cannot support a criterion. Trial level `COULD_NOT_ASSESS` is used when no criterion has supported evidence and no blocker was verified. An empty result set describes only the search performed and does not mean no suitable trial exists.
 
 The emergency list is a conservative starter placeholder pending clinician approval. Negation handling is intentionally simple; keyword rules can miss emergencies and can produce false positives.
 
@@ -188,3 +197,5 @@ The repository has no production hosting manifests. The API currently has no app
 - BigQuery provides managed vector storage and search. Monitor query cost and latency when tuning `CANDIDATES_TO_RETRIEVE`.
 - Ingestion is independent of request handling and can be scheduled externally, but the repository does not include a scheduler or autoscaling configuration.
 - Additional operational needs such as user authentication, access controls, rate limits, monitoring, and deployment automation remain future work.
+
+The mocked workflow latency regression test compares the same six delayed assessment calls at concurrency 1 and 6. A local run measured medians of 226.3 ms and 39.9 ms respectively. These values validate the concurrency change in a simulated workflow; they do not predict live model or BigQuery latency.

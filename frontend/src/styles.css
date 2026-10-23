@@ -1253,10 +1253,24 @@ button {
   gap: 12px;
 }
 
-.trial-tab-item {
-  background-color: var(--bg-surface);
+.trial-option {
+  background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow: var(--shadow-xs);
+}
+
+.trial-option-active {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.16), var(--shadow-sm);
+}
+
+.trial-tab-item {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   padding: 16px;
   text-align: left;
   display: flex;
@@ -1269,15 +1283,21 @@ button {
 }
 
 .trial-tab-item:hover {
-  border-color: var(--border-hover);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-sm);
+  background: var(--bg-subtle);
 }
 
-.trial-tab-active {
-  border-color: var(--primary);
-  background-color: #ffffff;
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2), var(--shadow-sm);
+.tab-citation-link {
+  display: block;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border-color);
+  color: var(--primary);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.tab-citation-link:hover {
+  text-decoration: underline;
 }
 
 .tab-top-row {

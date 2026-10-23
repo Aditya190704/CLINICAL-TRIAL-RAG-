@@ -11,6 +11,11 @@ const VERDICT_CONFIG = {
     icon: "!",
     variant: "warning",
   },
+  COULD_NOT_ASSESS: {
+    label: "Could not assess",
+    icon: "?",
+    variant: "neutral",
+  },
   EXCLUDED: {
     label: "Excluded",
     icon: "✕",

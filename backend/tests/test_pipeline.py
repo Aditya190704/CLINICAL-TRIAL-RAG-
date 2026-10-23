@@ -137,14 +137,15 @@ def test_pipeline_run_integration(mock_chunks, mock_trials, mock_assess, mock_re
 
     assert resp.patient_profile.sex == "FEMALE"
     assert len(resp.matches) == 2
-    # Ranking follows retrieval similarity; neither verdict establishes eligibility.
-    assert resp.matches[0].nct_id == "NCT00000001"
+    # Fewer unresolved criteria ranks before similarity; neither verdict
+    # establishes eligibility.
+    assert resp.matches[0].nct_id == "NCT00000002"
     assert resp.matches[0].verdict == "POSSIBLY_ELIGIBLE"
     assert "do not establish eligibility" in resp.matches[0].summary
-    assert resp.matches[1].nct_id == "NCT00000002"
-    assert resp.matches[1].verdict == "POSSIBLY_ELIGIBLE"
-    assert resp.matches[0].relevance_score == 0.88
-    assert len(resp.matches[0].passages) == 1
+    assert resp.matches[1].nct_id == "NCT00000001"
+    assert resp.matches[1].verdict == "COULD_NOT_ASSESS"
+    assert resp.matches[1].relevance_score == 0.88
+    assert len(resp.matches[1].passages) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -207,6 +207,7 @@ class TrialMatch(APIModel):
     verdict: Literal[
         "ELIGIBLE",
         "POSSIBLY_ELIGIBLE",
+        "COULD_NOT_ASSESS",
         "EXCLUDED",
     ]
 
@@ -223,6 +224,14 @@ class TrialMatch(APIModel):
     passages: list[Passage] = Field(default_factory=list)
 
 
+class RuledOutTrial(APIModel):
+    """Trial excluded by a verified blocking criterion."""
+
+    nct_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class MatchResponse(APIModel):
     patient_profile: PatientProfile
     matches: list[TrialMatch] = Field(default_factory=list)
@@ -232,6 +241,9 @@ class MatchResponse(APIModel):
     emergency_notice: str | None = None
     missing_key_facts: list[str] = Field(default_factory=list)
     conflicting_facts: list[str] = Field(default_factory=list)
+    ruled_out_trials: list[RuledOutTrial] = Field(default_factory=list)
+    result_message: str | None = None
+
 
     latency_seconds: float = Field(default=0, ge=0)
 

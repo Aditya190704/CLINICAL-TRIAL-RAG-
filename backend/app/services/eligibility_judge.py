@@ -158,7 +158,7 @@ def compute_verdict(criteria: list[CriterionResult]) -> str:
 
     Rules:
     - Any BLOCKS criterion -> EXCLUDED
-    - Otherwise, any UNKNOWN criterion or no criteria -> POSSIBLY_ELIGIBLE
+    - No supported criterion evidence and no blocker -> COULD_NOT_ASSESS
     - Otherwise -> POSSIBLY_ELIGIBLE
 
     Assessments are selective and may omit unreported or unassessed criteria,
@@ -167,7 +167,7 @@ def compute_verdict(criteria: list[CriterionResult]) -> str:
     if any(c.impact == "BLOCKS" for c in criteria):
         return "EXCLUDED"
 
-    if any(c.impact == "UNKNOWN" for c in criteria) or not criteria:
-        return "POSSIBLY_ELIGIBLE"
+    if not any(c.impact == "SUPPORTS" for c in criteria):
+        return "COULD_NOT_ASSESS"
 
     return "POSSIBLY_ELIGIBLE"

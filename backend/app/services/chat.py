@@ -217,6 +217,7 @@ def _retrieve_bigquery_evidence(
         location=settings.bq_location,
     )
 
+    query_job = None
     try:
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
@@ -228,7 +229,8 @@ def _retrieve_bigquery_evidence(
             ]
         )
 
-        rows = client.query(sql, job_config=job_config).result()
+        query_job = client.query(sql, job_config=job_config)
+        rows = query_job.result(timeout=settings.adk_timeout_seconds)
         ranked: list[dict[str, Any]] = []
 
         for row in rows:
@@ -255,6 +257,13 @@ def _retrieve_bigquery_evidence(
 
         return _select_evidence(ranked, selected_trial_ids)
 
+    except Exception:
+        try:
+            if query_job is not None:
+                query_job.cancel()
+        except Exception:
+            pass
+        raise
     finally:
         client.close()
 
@@ -429,6 +438,13 @@ async def _chat_answer(
         asyncio.to_thread(retrieve_for_chat, question, selected_trial_ids),
         timeout=settings.adk_timeout_seconds,
     )
+    # Defense in depth: never pass or cite content outside the selected IDs,
+    # even if a storage query or fallback returns an unexpected row.
+    evidence = [
+        item for item in evidence
+        if isinstance(item, dict)
+        and str(item.get("nct_id") or "").strip().upper() in selected_trial_ids
+    ]
     evidence = build_evidence_from_candidates(evidence)
 
     if not evidence:

@@ -21,8 +21,27 @@ BATCH_SIZE = 20
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 1.0
 REQUEST_INTERVAL_SECONDS = 12.0
+TRANSIENT_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 TaskType = Literal["RETRIEVAL_DOCUMENT", "RETRIEVAL_QUERY"]
+
+
+def _is_transient_error(error: Exception) -> bool:
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return True
+
+    status = getattr(error, "status_code", None)
+    if status is None:
+        status = getattr(error, "code", None)
+    if callable(status):
+        try:
+            status = status()
+        except Exception:
+            return False
+    try:
+        return int(status) in TRANSIENT_STATUS_CODES
+    except (TypeError, ValueError):
+        return False
 
 
 def _validate_task_type(task_type: str) -> TaskType:
@@ -111,7 +130,7 @@ def _embed_batch(
         except Exception as exc:
             last_error = exc
 
-            if attempt == MAX_RETRIES - 1:
+            if attempt == MAX_RETRIES - 1 or not _is_transient_error(exc):
                 break
 
             # Short bounded backoff avoids a long request storm when quota is exhausted.

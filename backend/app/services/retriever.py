@@ -162,23 +162,37 @@ def execute_vector_search(
         default_dataset=f"{project}.{dataset}",
     )
 
+    query_job = None
+
+    def cancel_query_job() -> None:
+        if query_job is not None:
+            try:
+                query_job.cancel()
+            except Exception:
+                pass
+
     try:
         query_job = client.query(sql, job_config=job_config, location=settings.bq_location)
-        rows = list(query_job.result())
+        rows = list(query_job.result(timeout=settings.adk_timeout_seconds))
         return rows
     except gcp_exceptions.NotFound as exc:
+        cancel_query_job()
         log_safe_error(logger, request_id=None, step="vector_search", error=exc)
         raise RuntimeError("BigQuery trial search is unavailable.") from exc
     except gcp_exceptions.Forbidden as exc:
+        cancel_query_job()
         log_safe_error(logger, request_id=None, step="vector_search", error=exc)
         raise PermissionError("BigQuery access is not configured.") from exc
     except gcp_exceptions.BadRequest as exc:
+        cancel_query_job()
         log_safe_error(logger, request_id=None, step="vector_search", error=exc)
         raise RuntimeError("BigQuery trial search could not be completed.") from exc
     except gcp_exceptions.GoogleAPICallError as exc:
+        cancel_query_job()
         log_safe_error(logger, request_id=None, step="vector_search", error=exc)
         raise RuntimeError("BigQuery trial search could not be completed.") from exc
     except Exception as exc:
+        cancel_query_job()
         log_safe_error(logger, request_id=None, step="vector_search", error=exc)
         raise RuntimeError("BigQuery trial search could not be completed.") from exc
 

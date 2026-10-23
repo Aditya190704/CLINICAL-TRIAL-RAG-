@@ -13,6 +13,8 @@ const API_BASE = "";
  * @property {string|null} [emergency_notice] Present when urgent screening stops matching.
  * @property {string[]} [missing_key_facts] Plain-language facts absent from the validated profile.
  * @property {string[]} [conflicting_facts] Conflicts detected in supported case text.
+ * @property {Array<{nct_id: string, title: string, reason: string}>} [ruled_out_trials]
+ * @property {string|null} [result_message] Search-specific empty-state explanation.
  */
 
 /**

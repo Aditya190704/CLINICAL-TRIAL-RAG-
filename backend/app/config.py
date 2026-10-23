@@ -70,13 +70,13 @@ class Settings(BaseSettings):
 
     # Retrieval and ranking
     top_k_chunks: int = Field(
-        default=20,
+        default=40,
         ge=1,
         le=500,
         validation_alias="CANDIDATES_TO_RETRIEVE",
     )
     candidates_to_judge: int = Field(
-        default=6,
+        default=10,
         ge=1,
         le=100,
         validation_alias="CANDIDATES_TO_JUDGE",

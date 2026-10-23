@@ -10,15 +10,16 @@ import time
 import uuid
 from typing import Any
 
-from app.agents.tasks import assess_trial, extract_patient
+from app.agents.tasks import assess_trial, extract_patient, propose_refinement
 from app.agents.tools import ApprovedTrialRetrieval
 from app.config import settings
 from app.safe_logging import error_status_code, log_safe_error
-from app.schemas import CriterionResult, MatchResponse, PatientProfile, TrialMatch
+from app.schemas import CriterionResult, MatchResponse, PatientProfile, RuledOutTrial, TrialMatch
 from app.services.eligibility_judge import compute_verdict, verify_judge_output
 from app.services.safety import (
     detect_supported_conflicts,
     derive_missing_facts,
+    remove_conflicting_fact_mentions,
     safe_search_query,
     validate_extracted_profile,
 )
@@ -33,10 +34,13 @@ DISCLAIMER = (
     "A qualified clinical team must review the official criteria and confirm any decision."
 )
 
-MAX_ASSESSMENTS = min(settings.final_results, settings.candidates_to_judge)
+HARD_MAX_ASSESSMENTS = 10
+MAX_ASSESSMENTS = min(HARD_MAX_ASSESSMENTS, settings.candidates_to_judge)
+MAX_SHORTLIST_RESULTS = 3
+REFINEMENT_MIN_SIMILARITY = 0.35
 MAX_WORKFLOW_SECONDS = min(
     300.0,
-    max(60.0, settings.adk_timeout_seconds * (MAX_ASSESSMENTS + 1) + 30.0),
+    max(60.0, settings.adk_timeout_seconds * (MAX_ASSESSMENTS + 2) + 30.0),
 )
 
 
@@ -102,10 +106,32 @@ def _candidate_chunk_ids(candidate: Any) -> list[str]:
     return [str(item) for item in value if item is not None] if isinstance(value, (list, tuple)) else []
 
 
+def _string_list(value: Any, limit: int) -> list[str]:
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        return []
+    return [item.strip() for item in values if isinstance(item, str) and item.strip()][:limit]
+
+
 def _trial_index() -> dict[str, dict[str, Any]]:
     raw = trials()
     if isinstance(raw, dict):
-        return {str(key).upper(): value for key, value in raw.items() if isinstance(value, dict)}
+        result = {}
+        for key, value in raw.items():
+            nct_id = str(key).strip().upper()
+            if not re.fullmatch(r"NCT\d{8}", nct_id) or not isinstance(value, dict):
+                continue
+            record = dict(value)
+            record_id = _trial_id(record)
+            if record_id and record_id != nct_id:
+                continue
+            if not record_id:
+                record["nct_id"] = nct_id
+            result[nct_id] = record
+        return result
     result: dict[str, dict[str, Any]] = {}
     for item in raw or []:
         if isinstance(item, dict) and _trial_id(item):
@@ -134,20 +160,28 @@ def _merge_candidates(first: list[Any], second: list[Any], index: dict[str, dict
     return _dedupe_candidates(first + second, index)
 
 
-def _get_passages(candidate: Any, nct_id: str, max_passages: int = 3) -> list[dict[str, str]]:
+def _chunk_index() -> dict[str, Any]:
     raw = chunks()
     if isinstance(raw, dict):
-        lookup = raw
-    else:
-        lookup = {
-            _text(item.get("chunk_id")): item
-            for item in raw or []
-            if isinstance(item, dict) and _text(item.get("chunk_id"))
-        }
+        return raw
+    return {
+        _text(item.get("chunk_id")): item
+        for item in raw or []
+        if isinstance(item, dict) and _text(item.get("chunk_id"))
+    }
+
+
+def _get_passages(
+    candidate: Any,
+    nct_id: str,
+    lookup: dict[str, Any] | None = None,
+    max_passages: int = 3,
+) -> list[dict[str, str]]:
+    lookup = lookup if lookup is not None else _chunk_index()
     passages: list[dict[str, str]] = []
     for chunk_id in _candidate_chunk_ids(candidate):
         item = lookup.get(chunk_id)
-        if not item or _text(item.get("nct_id")).upper() != nct_id:
+        if not isinstance(item, dict) or _text(item.get("nct_id")).upper() != nct_id:
             continue
         text = _text(item.get("chunk_text") or item.get("text") or item.get("content"))
         if text:
@@ -161,7 +195,12 @@ def _get_passages(candidate: Any, nct_id: str, max_passages: int = 3) -> list[di
 
 
 def _verdict_priority(verdict: str) -> int:
-    return {"ELIGIBLE": 0, "POSSIBLY_ELIGIBLE": 1, "EXCLUDED": 2}.get(verdict, 3)
+    return {
+        "ELIGIBLE": 0,
+        "POSSIBLY_ELIGIBLE": 1,
+        "COULD_NOT_ASSESS": 2,
+        "EXCLUDED": 3,
+    }.get(verdict, 4)
 
 
 def _criterion_priority(criteria: list[CriterionResult]) -> tuple[int, int, int]:
@@ -172,7 +211,41 @@ def _criterion_priority(criteria: list[CriterionResult]) -> tuple[int, int, int]
     return (-supports, unknowns, blocks)
 
 
-def _build_match(candidate: Any, trial: dict[str, Any], assessment: dict[str, Any], rank: int) -> TrialMatch:
+def _unresolved_count(criteria: list[CriterionResult]) -> int:
+    return sum(item.impact == "UNKNOWN" for item in criteria)
+
+
+def _refinement_query_is_useful(query: str, initial_query: str) -> bool:
+    initial_terms = set(re.findall(r"[a-z0-9]+", initial_query.casefold()))
+    refined_terms = set(re.findall(r"[a-z0-9]+", query.casefold()))
+    return bool(refined_terms - initial_terms)
+
+
+def _refinement_query_is_profile_grounded(query: str, profile: PatientProfile) -> bool:
+    supported_values = [
+        profile.search_query,
+        *profile.primary_conditions,
+        *profile.comorbidities,
+        *profile.current_medications,
+        *profile.prior_treatments,
+        *profile.key_findings,
+    ]
+    supported_terms = {
+        term
+        for value in supported_values
+        for term in re.findall(r"[a-z0-9]+", str(value).casefold())
+    }
+    query_terms = re.findall(r"[a-z0-9]+", query.casefold())
+    return bool(query_terms) and all(term in supported_terms for term in query_terms)
+
+
+def _build_match(
+    candidate: Any,
+    trial: dict[str, Any],
+    assessment: dict[str, Any],
+    rank: int,
+    chunk_lookup: dict[str, Any],
+) -> TrialMatch:
     nct_id = _trial_id(trial)
     return TrialMatch(
         rank=rank,
@@ -180,16 +253,16 @@ def _build_match(candidate: Any, trial: dict[str, Any], assessment: dict[str, An
         title=_trial_title(trial),
         url=_trial_url(nct_id),
         status=_text(trial.get("overall_status") or trial.get("status")) or "Unknown",
-        phases=trial.get("phases") or [],
-        conditions=(trial.get("conditions") or [])[:6],
+        phases=_string_list(trial.get("phases"), 20),
+        conditions=_string_list(trial.get("conditions"), 6),
         sponsor=_text(trial.get("lead_sponsor") or trial.get("sponsor")) or None,
-        locations=(trial.get("locations") or [])[:3],
+        locations=_string_list(trial.get("locations"), 3),
         relevance_score=round(_candidate_score(candidate), 3),
         verdict=assessment["verdict"],
         summary=assessment["summary"],
         criteria=assessment["criteria"],
         dropped_unverified=assessment["dropped_unverified"],
-        passages=_get_passages(candidate, nct_id),
+        passages=_get_passages(candidate, nct_id, chunk_lookup),
     )
 
 
@@ -212,9 +285,13 @@ async def _run_steps(case: str, request_id: str) -> MatchResponse:
     conflicts, excluded_values = detect_supported_conflicts(case)
     missing = derive_missing_facts(profile)
     conflicts = list(dict.fromkeys(conflicts))
+    assessment_case = remove_conflicting_fact_mentions(case, excluded_values)
 
     try:
-        query = safe_search_query(profile.search_query, case, profile)
+        # Start with validated primary diagnoses. Less common modifiers remain
+        # available to a single refinement if the initial retrieval is weak.
+        query = " ".join(profile.primary_conditions) or profile.search_query
+        query = safe_search_query(query, case, profile)
         for value in excluded_values:
             query = re.sub(rf"(?<!\w){re.escape(value)}(?!\w)", " ", query, flags=re.I)
         query = " ".join(query.split())
@@ -244,30 +321,111 @@ async def _run_steps(case: str, request_id: str) -> MatchResponse:
             disclaimer=DISCLAIMER,
             missing_key_facts=missing,
             conflicting_facts=conflicts,
+            result_message="No suitable trial was found in this search. This does not mean that no suitable trial exists.",
         )
 
-    assessment_cap = max(0, min(int(settings.candidates_to_judge), int(settings.final_results)))
-    candidates = candidates[:assessment_cap]
     try:
-        assessments: dict[str, dict[str, Any]] = {}
-        # Assess serially so a provider error halts the request before later
-        # trial assessment calls are sent.
-        for candidate in candidates:
+        # Criteria checks are independent model calls. Bound their concurrency
+        # to avoid serial latency while respecting the configured provider cap.
+        assessment_limit = max(1, int(settings.adk_concurrency))
+        semaphore = asyncio.Semaphore(assessment_limit)
+        assessment_cap = max(0, min(HARD_MAX_ASSESSMENTS, int(settings.candidates_to_judge)))
+
+        async def assess_candidate(candidate: Any) -> tuple[str, dict[str, Any]]:
             nct_id = _candidate_id(candidate)
-            output = await assess_trial(case=case, profile=profile, trial=index[nct_id])
-            criteria, _, dropped = verify_judge_output(case, profile, index[nct_id], output)
+            trial = index[nct_id]
+            async with semaphore:
+                output = await assess_trial(case=assessment_case, profile=profile, trial=trial)
+            criteria, _, dropped = verify_judge_output(assessment_case, profile, index[nct_id], output)
             verdict = compute_verdict(criteria)
             summary = (
                 "A potentially disqualifying criterion was identified in this preliminary review. A qualified clinical team must verify it."
                 if verdict == "EXCLUDED"
+                else "The available evidence was insufficient to assess this trial's criteria. A qualified clinical team must review the official criteria."
+                if verdict == "COULD_NOT_ASSESS"
                 else "The available criteria do not establish eligibility. Some information may be missing or unassessed; a qualified clinical team must review the official criteria."
             )
-            assessments[nct_id] = {
+            return nct_id, {
                 "criteria": criteria,
                 "summary": summary,
                 "dropped_unverified": dropped,
                 "verdict": verdict,
             }
+
+        async def assess_candidates(items: list[Any]) -> dict[str, dict[str, Any]]:
+            assessment_tasks = [asyncio.create_task(assess_candidate(item)) for item in items]
+            try:
+                return dict(await asyncio.gather(*assessment_tasks))
+            except BaseException:
+                for task in assessment_tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*assessment_tasks, return_exceptions=True)
+                raise
+
+        # Weak retrieval refinement used to sit on the critical path before
+        # any eligibility work began. Overlap its optional model/search work
+        # with assessment of the initial shortlist. Strong results never pay
+        # for refinement, and the backend still permits at most two searches.
+        initial_candidates = candidates[:assessment_cap]
+        should_refine = (
+            not candidates
+            or _candidate_score(candidates[0]) < REFINEMENT_MIN_SIMILARITY
+        )
+        refinement_task = None
+        if should_refine:
+            refinement_task = asyncio.create_task(
+                propose_refinement(case=case, profile=profile, candidate_count=len(candidates))
+            )
+
+        try:
+            assessments = await assess_candidates(initial_candidates)
+        except BaseException:
+            if refinement_task is not None and not refinement_task.done():
+                refinement_task.cancel()
+                await asyncio.gather(refinement_task, return_exceptions=True)
+            raise
+
+        if refinement_task is not None:
+            refined_candidates = None
+            try:
+                proposal = await refinement_task
+                if proposal.refine:
+                    refined_query = safe_search_query(proposal.search_query, case, profile)
+                    for value in excluded_values:
+                        refined_query = re.sub(
+                            rf"(?<!\w){re.escape(value)}(?!\w)",
+                            " ",
+                            refined_query,
+                            flags=re.I,
+                        )
+                    refined_query = " ".join(refined_query.split())
+                    if (
+                        refined_query
+                        and _refinement_query_is_profile_grounded(refined_query, profile)
+                        and _refinement_query_is_useful(refined_query, query)
+                    ):
+                        second_raw = await retrieval.search(refined_query)
+                        candidates = _merge_candidates(candidates, second_raw, index)
+                        retrieval_calls = retrieval.calls
+                        refined_candidates = candidates[:assessment_cap]
+            except BaseException as exc:
+                if not isinstance(exc, Exception):
+                    if refinement_task and not refinement_task.done():
+                        refinement_task.cancel()
+                    raise
+                # Refinement is optional. Preserve valid initial results if the
+                # optional agent or second retrieval fails.
+                _log_failure(request_id, "optional_refinement", exc)
+            if refined_candidates is not None:
+                missing_candidates = [
+                    item for item in refined_candidates
+                    if _candidate_id(item) not in assessments
+                ]
+                if missing_candidates:
+                    assessments.update(await assess_candidates(missing_candidates))
+                candidates = refined_candidates
+        candidates = candidates[:assessment_cap]
     except Exception as exc:
         _log_failure(request_id, "criteria_assessment", exc)
         status_code = error_status_code(exc)
@@ -277,10 +435,49 @@ async def _run_steps(case: str, request_id: str) -> MatchResponse:
             status_code=503 if status_code == 429 else 504 if status_code == 408 else 500,
         ) from exc
 
-    ranked = sorted(candidates, key=lambda candidate: (-_candidate_score(candidate), _candidate_id(candidate)))
+    ranked = sorted(
+        candidates,
+        key=lambda candidate: (
+            _verdict_priority(assessments[_candidate_id(candidate)]["verdict"]),
+            _unresolved_count(assessments[_candidate_id(candidate)]["criteria"]),
+            -_candidate_score(candidate),
+            _candidate_id(candidate),
+        ),
+    )
+    ruled_out = []
+    for candidate in ranked:
+        nct_id = _candidate_id(candidate)
+        assessment = assessments[nct_id]
+        if assessment["verdict"] != "EXCLUDED":
+            continue
+        blocker = next(
+            (item for item in assessment["criteria"] if item.impact == "BLOCKS"),
+            None,
+        )
+        if blocker is not None:
+            reason = f"Verified blocking criterion: {blocker.criterion_quote}"[:500]
+            ruled_out.append(
+                RuledOutTrial(
+                    nct_id=nct_id,
+                    title=_trial_title(index[nct_id]),
+                    reason=reason,
+                )
+            )
+    shortlist = [
+        candidate
+        for candidate in ranked
+        if assessments[_candidate_id(candidate)]["verdict"] != "EXCLUDED"
+    ][:min(MAX_SHORTLIST_RESULTS, max(0, int(settings.final_results)))]
+    chunk_lookup = _chunk_index()
     matches = [
-        _build_match(candidate, index[_candidate_id(candidate)], assessments[_candidate_id(candidate)], rank)
-        for rank, candidate in enumerate(ranked[:max(0, int(settings.final_results))], start=1)
+        _build_match(
+            candidate,
+            index[_candidate_id(candidate)],
+            assessments[_candidate_id(candidate)],
+            rank,
+            chunk_lookup,
+        )
+        for rank, candidate in enumerate(shortlist, start=1)
     ]
     logger.info(
         "request_id=%s step=matching_complete candidates=%d results=%d retrieval_calls=%d",
@@ -295,6 +492,12 @@ async def _run_steps(case: str, request_id: str) -> MatchResponse:
         disclaimer=DISCLAIMER,
         missing_key_facts=missing,
         conflicting_facts=conflicts,
+        ruled_out_trials=ruled_out,
+        result_message=(
+            "No suitable trial was found in this search. This does not mean that no suitable trial exists."
+            if not matches
+            else None
+        ),
     )
 
 

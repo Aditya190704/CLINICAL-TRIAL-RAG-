@@ -75,6 +75,7 @@ def detect_supported_conflicts(case: str) -> tuple[list[str], list[str]]:
     excluded: list[str] = []
 
     ages = list(re.finditer(r"\b(\d{1,3})(?:\s*years?\s*old|-year-old|\s*yo)\b", case, re.I))
+    ages.extend(re.finditer(r"\b(?:age|aged)\s+(\d{1,3})\b", case, re.I))
     age_values = list(dict.fromkeys(item.group(1) for item in ages))
     if len(age_values) > 1:
         conflicts.append("Conflicting ages are stated in the case.")
@@ -89,18 +90,73 @@ def detect_supported_conflicts(case: str) -> tuple[list[str], list[str]]:
     return conflicts, excluded
 
 
+def remove_conflicting_fact_mentions(case: str, excluded_values: list[str]) -> str:
+    """Remove age and stage statements whose values conflict in the case."""
+    safe_case = case
+    for value in excluded_values:
+        escaped = re.escape(str(value))
+        if value.isdigit():
+            pattern = rf"\b(?:(?:age|aged)\s*)?{escaped}(?:\s*years?\s*old|-year-old|\s*yo)?\b"
+        else:
+            pattern = rf"\b(?:stage\s*|stg\.?\s*){escaped}[A-D]?\b"
+        safe_case = re.sub(pattern, " [conflicting fact omitted] ", safe_case, flags=re.I)
+    return " ".join(safe_case.split())
+
+
 def validate_extracted_profile(profile: PatientProfile, case: str) -> PatientProfile:
     """Validate extracted facts and remove values involved in detected conflicts."""
+    raw_primary_conditions = list(profile.primary_conditions)
+    raw_key_findings = list(profile.key_findings)
     validated = _validate_profile(profile, case)
     conflicts, excluded = detect_supported_conflicts(case)
-    if excluded:
-        excluded_norm = {value.casefold() for value in excluded}
-        validated.key_findings = [
-            fact for fact in validated.key_findings
-            if not any(value in fact.casefold() for value in excluded_norm)
-        ]
-        if any(conflict.startswith("Conflicting ages") for conflict in conflicts):
-            validated.age_years = None
+    stage_values = {
+        value.casefold()
+        for value in excluded
+        if re.fullmatch(r"(?:IV|III|II|I|4|3|2|1|0)[A-D]?", value, re.I)
+    }
+    if stage_values:
+        def remove_conflicting_stage(fact: str) -> str:
+            for value in stage_values:
+                fact = re.sub(
+                    rf"\b(?:stage\s*|stg\.?\s*){re.escape(value)}\b",
+                    " ",
+                    fact,
+                    flags=re.I,
+                )
+            return " ".join(fact.split()).strip(" ,;:-")
+
+        for field_name in ("primary_conditions", "key_findings"):
+            cleaned_facts = [
+                remove_conflicting_stage(fact)
+                for fact in (
+                    raw_primary_conditions
+                    if field_name == "primary_conditions"
+                    else raw_key_findings
+                )
+            ]
+            case_normalized = re.sub(r"[^a-z0-9]+", " ", case.casefold()).strip()
+            supported_facts = [
+                fact for fact in cleaned_facts
+                if fact
+                and re.sub(r"[^a-z0-9]+", " ", fact.casefold()).strip() in case_normalized
+            ]
+            existing = getattr(validated, field_name)
+            setattr(validated, field_name, list(dict.fromkeys([*existing, *supported_facts])))
+    if any(conflict.startswith("Conflicting ages") for conflict in conflicts):
+        validated.age_years = None
+
+    query_facts = list(dict.fromkeys([
+        *validated.primary_conditions,
+        *validated.key_findings,
+        *validated.prior_treatments,
+        *validated.current_medications,
+    ]))
+    validated.search_query = (
+        " ".join(query_facts)
+        or remove_instruction_like_clauses(
+            remove_conflicting_fact_mentions(case, excluded)
+        )
+    )[:2000]
     return validated
 
 
@@ -110,7 +166,26 @@ def safe_search_query(query: str, case: str, profile: PatientProfile) -> str:
     query = " ".join(remove_instruction_like_clauses(str(query or "")).split())[:2000]
     source_terms = set(re.findall(r"[a-z0-9]+", clean_case.casefold()))
     terms = re.findall(r"[a-z0-9]+", query.casefold())
-    if not terms or any(term not in source_terms for term in terms):
-        raise ValueError("Search query contains unsupported facts.")
-    return query
+    if terms and all(term in source_terms for term in terms):
+        return query
+
+    # Sanitization can remove an entire model-proposed query when it contains
+    # an instruction-like clause. Fall back to already-validated profile facts.
+    supported_facts = [
+        *profile.primary_conditions,
+        *profile.comorbidities,
+        *profile.current_medications,
+        *profile.prior_treatments,
+        *profile.key_findings,
+    ]
+    fallback = " ".join(
+        fact for fact in supported_facts
+        if fact and re.search(
+            rf"(?<![a-z0-9]){re.escape(fact.casefold())}(?![a-z0-9])",
+            clean_case.casefold(),
+        )
+    )
+    if fallback:
+        return fallback[:2000]
+    raise ValueError("Search query contains unsupported facts.")
 

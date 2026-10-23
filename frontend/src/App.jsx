@@ -455,7 +455,7 @@ export default function App() {
                   <span className="section-eyebrow">TRIAL SHORTLIST</span>
                   <h3 className="shortlist-title">Candidate Clinical Trials</h3>
                   <p className="shortlist-subtitle">
-                    Select a trial below to review verbatim eligibility criteria and evidence citations.
+                    Top three non-excluded candidates. Select a trial to review its criterion evidence and citations.
                   </p>
                 </div>
               </div>
@@ -478,9 +478,9 @@ export default function App() {
             </div>
           ) : (
             <div className="no-matches-card">
-              <h4>No candidate trials were returned for this search</h4>
+              <h4>{currentData.result_message || "No suitable trial was found in this search"}</h4>
               <p>
-                This does not mean that no suitable trial exists. Review any missing or conflicting information and consult a qualified clinical team.
+                Review any missing or conflicting information and consult a qualified clinical team. This result applies only to the trials found in this search.
               </p>
             </div>
           )}

@@ -1,7 +1,7 @@
 from app.schemas import CriterionResult, JudgeOutput, JudgedCriterion, PatientProfile
 from app.services.eligibility_judge import compute_verdict, verify_judge_output
 from app.services.patient_parser import _validate_profile
-from app.services.safety import detect_supported_conflicts, derive_missing_facts, safe_search_query, screen_urgent_case
+from app.services.safety import detect_supported_conflicts, derive_missing_facts, safe_search_query, screen_urgent_case, validate_extracted_profile
 
 
 def test_patient_profile_discards_facts_not_supported_by_case():
@@ -24,7 +24,7 @@ def test_patient_profile_discards_facts_not_supported_by_case():
     assert validated.primary_conditions == ["breast cancer"]
     assert validated.current_medications == ["tamoxifen"]
     assert validated.key_findings == []
-    assert validated.search_query == "breast cancer"
+    assert validated.search_query == "breast cancer tamoxifen"
 
 
 def test_patient_profile_keeps_explicit_age_and_sex():
@@ -54,7 +54,7 @@ def test_non_blocking_assessment_never_reports_eligible():
     )
 
     assert compute_verdict([supported]) == "POSSIBLY_ELIGIBLE"
-    assert compute_verdict([]) == "POSSIBLY_ELIGIBLE"
+    assert compute_verdict([]) == "COULD_NOT_ASSESS"
 
     blocked = supported.model_copy(update={"impact": "BLOCKS"})
     assert compute_verdict([blocked]) == "EXCLUDED"
@@ -97,6 +97,20 @@ def test_conflicting_facts_are_reported_and_missing_facts_are_deterministic():
     missing = derive_missing_facts(PatientProfile(search_query="disease"))
     assert "Age" in missing
     assert "Main diagnosis or condition" in missing
+
+
+def test_conflicting_stage_is_removed_from_validated_query_but_keeps_diagnosis():
+    case = "Patient has stage II and stage III breast cancer with HER2 positive disease."
+    profile = PatientProfile(
+        primary_conditions=["stage II breast cancer"],
+        key_findings=["stage II", "HER2 positive"],
+        search_query="stage II breast cancer",
+    )
+    validated = validate_extracted_profile(profile, case)
+    assert validated.primary_conditions == ["breast cancer"]
+    assert "stage II" not in validated.search_query.casefold()
+    assert "stage iii" not in validated.search_query.casefold()
+    assert "HER2 positive" in validated.search_query
 
 
 def test_instruction_text_is_removed_from_validated_search_query():

@@ -21,7 +21,7 @@ Clinical Trial RAG helps a clinician or researcher review de-identified patient 
 
 ## Overview
 
-The React frontend sends an anonymized case to a FastAPI service. A deterministic intake screen validates length and common direct identifiers, then checks a reviewable emergency-warning list before any model or retrieval call. Google ADK agents extract supported facts, assess trial criteria, and answer selected-trial follow-up questions. Retrieval uses one query made from the sanitized case text so a model paraphrase cannot change the candidate search between runs. Ordinary application code controls retrieval, validates evidence, computes verdicts, ranks results, and limits returned candidates.
+The React frontend sends an anonymized case to FastAPI. Deterministic intake checks validate length and common direct identifiers, then screen the reviewable emergency-warning list before any model or retrieval call. Google ADK agents extract supported facts, may propose one bounded search refinement, assess trial criteria, and answer selected-trial follow-up questions. Ordinary application code validates facts and quotations, controls retrieval limits, computes conservative verdicts, and ranks the shortlist.
 
 Every result is preliminary. A qualified clinical team must review the official trial record and confirm any eligibility decision.
 
@@ -30,9 +30,10 @@ Every result is preliminary. A qualified clinical team must review the official 
 - Search trial chunks stored in BigQuery using Vertex AI embeddings.
 - Extract structured facts while reporting missing and conflicting information.
 - Screen for configured urgent warning phrases before model or retrieval calls.
-- Use one deterministic trial retrieval call per matching request.
+- Use one initial retrieval and at most one profile-grounded refinement retrieval.
+- Return up to three non-excluded trials and separate verified exclusions.
 - Verify model-provided trial and patient quotes before using criterion assessments.
-- Return `EXCLUDED` for verified blocking evidence; otherwise return `POSSIBLY_ELIGIBLE`.
+- Return `EXCLUDED` for a verified blocker, `COULD_NOT_ASSESS` when no criterion has supported evidence, and otherwise `POSSIBLY_ELIGIBLE`. This system does not claim likely eligibility because it assesses only a bounded subset of trial criteria.
 - Mark criteria that lack enough evidence as `UNKNOWN` (`Could not assess` in the UI).
 - Answer follow-up questions from evidence belonging only to validated selected trial IDs.
 - Fetch and ingest ClinicalTrials.gov data, with optional PMC enrichment and GCS storage.
@@ -42,9 +43,9 @@ Every result is preliminary. A qualified clinical team must review the official 
 1. FastAPI validates the request and screens common direct identifiers.
 2. Deterministic emergency screening runs before any model or retrieval work. A trigger returns an emergency notice, empty results, and the advisory disclaimer.
 3. An ADK extraction agent returns a Pydantic-validated patient profile and uncertainty signals. Application code verifies facts against the case and removes detected conflicting values from search.
-4. The approved retrieval wrapper performs one search and filters candidates to the configured trial store.
-5. The sanitized original case is used as the single retrieval query. Instruction-like clauses are removed before extraction and retrieval.
-6. An ADK criteria-assessment agent assesses the capped candidate set one trial at a time. If an assessment errors, later trial calls stop. Ordinary code verifies quotes, computes conservative verdicts, and ranks results by retrieval similarity with an NCT ID tie-breaker.
+4. Validated diagnoses, key findings, prior treatments, and current medications form the initial retrieval query. Candidate IDs are checked against the configured trial store and deduplicated.
+5. If no candidates are found or the best cosine similarity is below `0.35`, one ADK refinement proposal may be requested. The backend accepts it only when all terms occur in validated profile facts and it adds a useful term. The retrieval wrapper enforces at most two calls total.
+6. The top candidates are capped at `min(CANDIDATES_TO_JUDGE, 10)`. Independent assessments run concurrently up to `ADK_CONCURRENCY`; outstanding calls are cancelled and cleaned up if the workflow fails or times out. Ordinary code verifies quotes and computes conservative verdicts. Up to three non-excluded trials are ordered by verdict, fewer unresolved criteria, similarity descending, then NCT ID ascending. Excluded trials and their verified blocking reasons appear separately.
 7. Follow-up chat validates trial IDs and retrieves evidence only from those selected trials. An ADK chat agent answers from that evidence and reports when it is insufficient.
 
 ADK agents have no arbitrary shell, filesystem, network, SQL, or Google Cloud tools. Backend code controls the existing retrieval and evidence services. Each model task uses a fresh in-memory ADK session, deleted after the call. No ADK session service or chat memory is persisted.
@@ -130,8 +131,8 @@ The backend loads `backend/.env` and process environment variables. Never commit
 | `EMBEDDING_DIM` | `768` | Expected vector dimension. |
 | `GEMINI_MODEL` | `gemini-2.5-flash` | ADK model used for extraction, criteria assessment, and chat. |
 | `CANDIDATES_TO_RETRIEVE` | `20` | BigQuery retrieval chunk limit. |
-| `CANDIDATES_TO_JUDGE` | `6` | Maximum candidates assessed per matching request. |
-| `TOP_K_RESULTS` | `3` | Maximum matches returned. |
+| `CANDIDATES_TO_JUDGE` | `6` | Assessment count setting, with a hard application cap of 10. |
+| `TOP_K_RESULTS` | `3` | Maximum non-excluded shortlist results; hard application cap of 3. |
 | `ADK_CONCURRENCY` | `6` | Maximum concurrent criteria assessments. |
 | `ADK_TIMEOUT_SECONDS` | `60.0` | Per-agent and retrieval-call timeout; overall matching and chat timeouts are derived from this value and capped in code. |
 | `ADK_APP_NAME` | `clinical_trial_matcher` | ADK application label. |
@@ -178,7 +179,7 @@ python -m ingestion.fetch_trials
 python -m ingestion.ingest --refresh
 ```
 
-`MatchResponse` adds optional `emergency_notice`, `missing_key_facts`, and `conflicting_facts` fields with safe defaults. Existing fields remain. Criterion `UNKNOWN` is the existing backward-compatible state for a criterion that could not be assessed. Empty result sets mean that this search returned no candidates; they do not establish that no suitable trial exists.
+`MatchResponse` retains existing fields and adds optional `emergency_notice`, `missing_key_facts`, `conflicting_facts`, `ruled_out_trials`, and `result_message` fields with safe defaults. Criterion `UNKNOWN` remains the criterion-level state; `COULD_NOT_ASSESS` is returned when no trial criterion has supported evidence. An empty shortlist means no suitable non-excluded candidate was found in this search; it does not establish that no suitable trial exists.
 
 ## Project Structure
 
@@ -214,6 +215,8 @@ The backend tests mock model, BigQuery, and Google Cloud calls. Run them from `b
 ```powershell
 python -m pytest -q
 ```
+
+The repeatable mocked workflow timing check is `python -m pytest -s tests/test_workflow.py::test_mocked_assessment_latency_improves_with_bounded_concurrency -q`. In one local run, six mocked 30 ms assessment calls took a median **226.3 ms** with concurrency set to 1 and **39.9 ms** with concurrency set to 6. This is a simulated workflow comparison, not a Gemini or BigQuery latency measurement. No live cloud latency or cost measurements were made.
 
 Build the frontend from `frontend/`:
 

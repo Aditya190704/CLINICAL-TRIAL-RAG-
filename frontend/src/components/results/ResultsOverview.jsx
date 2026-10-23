@@ -24,9 +24,7 @@ export default function ResultsOverview({
       m.verdict === "POSSIBLY_ELIGIBLE" ||
       m.verdict === "POSSIBLY ELIGIBLE"
   ).length;
-  const excluded = matches.filter(
-    (m) => m.verdict === "EXCLUDED"
-  ).length;
+  const couldNotAssess = matches.filter((m) => m.verdict === "COULD_NOT_ASSESS").length;
 
   const handleCopy = () => {
     if (onCopySummary) {
@@ -47,6 +45,13 @@ export default function ResultsOverview({
         <div className="stat-divider" />
 
         <div className="stat-item">
+          <span className="stat-label">Could Not Assess</span>
+          <span className="stat-value">{couldNotAssess}</span>
+        </div>
+
+        <div className="stat-divider" />
+
+        <div className="stat-item">
           <span className="stat-label">Likely Eligible</span>
           <span className="stat-value text-success">{eligible}</span>
         </div>
@@ -56,13 +61,6 @@ export default function ResultsOverview({
         <div className="stat-item">
           <span className="stat-label">Possibly Eligible</span>
           <span className="stat-value text-warning">{possible}</span>
-        </div>
-
-        <div className="stat-divider" />
-
-        <div className="stat-item">
-          <span className="stat-label">Excluded</span>
-          <span className="stat-value text-danger">{excluded}</span>
         </div>
 
         {data.latency_seconds > 0 && (

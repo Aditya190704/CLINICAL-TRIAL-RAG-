@@ -715,6 +715,7 @@ export default function TrialCard({
     {
       ELIGIBLE: "Likely eligible",
       POSSIBLY_ELIGIBLE: "Possibly eligible",
+      COULD_NOT_ASSESS: "Could not assess",
       EXCLUDED: "Excluded",
     }[verdict] || formatValue(verdict) || "Needs verification";
 

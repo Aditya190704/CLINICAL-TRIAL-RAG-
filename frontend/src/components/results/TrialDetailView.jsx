@@ -167,6 +167,8 @@ export default function TrialDetailView({
               ? "All assessed criteria support this patient case with no blocking exclusions found."
               : verdict === "EXCLUDED"
               ? "At least one evaluated criterion blocks this patient based on documented evidence."
+              : verdict === "COULD_NOT_ASSESS"
+              ? "The available evidence was not sufficient to assess this trial's criteria."
               : "No definitive blockers identified, but certain required clinical criteria remain unknown."}
           </p>
         </div>
