@@ -2,8 +2,6 @@
    Clinical Trial Matcher — Production-Grade SaaS Light Theme & Design System
    ========================================================================== */
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
-
 :root {
   /* Surface & Backgrounds */
   --bg-app: #f8fafc;
@@ -3991,4 +3989,72 @@ body {
     max-width: 100%;
     padding-left: 3px;
   }
+}
+
+/* Medical identity accents shared by sign-in and the signed-in workspace. */
+.auth-page {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 8% 82%, rgba(184, 219, 246, .28), transparent 25%),
+    radial-gradient(circle at 95% 8%, rgba(187, 220, 248, .3), transparent 27%),
+    linear-gradient(145deg, #eef5fc, #f8fbff 53%, #eaf3fb);
+}
+
+.auth-page::before,
+.auth-page::after {
+  position: absolute;
+  z-index: 0;
+  width: 78px;
+  height: 78px;
+  border: 1px solid rgba(87, 145, 199, .12);
+  border-radius: 50%;
+  content: "";
+  pointer-events: none;
+}
+
+.auth-page::before { top: 8%; left: 5%; box-shadow: 0 0 0 14px rgba(255,255,255,.2), 0 0 0 29px rgba(255,255,255,.16); }
+.auth-page::after { right: 5%; bottom: 8%; width: 108px; height: 108px; box-shadow: 0 0 0 16px rgba(255,255,255,.18); }
+.auth-layout { position: relative; z-index: 1; display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(390px, .8fr); width: min(100%, 1030px); min-height: 610px; overflow: hidden; border: 1px solid #d8e6f4; border-radius: 24px; background: #fff; box-shadow: 0 28px 85px rgba(35, 74, 117, .15); }
+.auth-visual-panel { position: relative; display: flex; flex-direction: column; justify-content: space-between; min-width: 0; overflow: hidden; padding: 30px 36px 25px; background: linear-gradient(150deg, #f7fbff, #edf6ff 65%, #e6f2fc); }
+.auth-visual-panel::after { position: absolute; right: -118px; bottom: -162px; width: 390px; height: 390px; border: 1px solid rgba(92, 151, 205, .14); border-radius: 50%; box-shadow: 0 0 0 24px rgba(255,255,255,.16), 0 0 0 49px rgba(255,255,255,.14); content: ""; pointer-events: none; }
+.auth-visual-brand { position: relative; z-index: 1; display: flex; align-items: center; gap: 10px; color: #1d3857; font-size: 14px; font-weight: 780; letter-spacing: -.02em; }
+.auth-brand-mark { display: grid; width: 39px; height: 39px; place-items: center; border: 1px solid #d2e5f7; border-radius: 12px; background: #fff; color: #3d85c6; box-shadow: 0 4px 12px rgba(55, 112, 165, .09); }
+.auth-brand-mark svg { width: 26px; height: 26px; }
+.auth-artwork-wrap { position: absolute; top: 100px; right: -13px; left: -9px; opacity: .96; }
+.auth-medical-artwork { display: block; width: 100%; max-height: 300px; }
+.auth-visual-copy { position: relative; z-index: 1; max-width: 420px; margin-top: auto; padding-top: 275px; }
+.auth-visual-kicker { display: inline-flex; align-items: center; gap: 7px; color: #5880a5; font-size: 9px; font-weight: 800; letter-spacing: .13em; }
+.auth-visual-kicker i { width: 7px; height: 7px; border-radius: 50%; background: #48a88f; box-shadow: 0 0 0 4px rgba(72,168,143,.12); }
+.auth-visual-copy h2 { margin: 12px 0 9px; color: #1d3857; font-size: clamp(22px, 2.8vw, 31px); font-weight: 760; letter-spacing: -.045em; line-height: 1.15; }
+.auth-visual-copy p { max-width: 340px; margin: 0; color: #647d96; font-size: 12px; line-height: 1.65; }
+.auth-visual-footer { position: relative; z-index: 1; display: flex; align-items: center; gap: 8px; margin-top: 25px; padding-top: 15px; border-top: 1px solid rgba(137, 174, 208, .28); color: #68819a; font-size: 10px; }
+.auth-visual-footer span { color: #4b94d0; font-size: 13px; }
+.auth-card { align-self: center; width: 100%; max-width: none; padding: 45px clamp(28px, 5vw, 58px); border: 0; border-radius: 0; background: #fff; box-shadow: none; }
+.auth-mobile-brand { display: none; align-items: center; gap: 9px; margin-bottom: 24px; color: #1d3857; font-size: 13px; font-weight: 760; }
+.auth-card .auth-eyebrow { margin-top: 0; }
+.auth-card .auth-submit { border-radius: 9px; background: linear-gradient(100deg, #367fcc, #4c92d7); box-shadow: 0 5px 12px rgba(55, 125, 194, .18); }
+.auth-card .auth-submit:hover { background: linear-gradient(100deg, #2c70b8, #3f83c8); }
+.auth-card .auth-form input { min-height: 43px; border-color: #d9e4ef; background: #fbfdff; }
+.auth-card .auth-form input:focus { border-color: #78a9d7; box-shadow: 0 0 0 3px rgba(71, 139, 201, .12); }
+.workspace-welcome { isolation: isolate; }
+.welcome-medical-artwork { position: absolute; z-index: -1; top: -21px; right: 20%; width: min(36%, 390px); min-width: 255px; opacity: .22; pointer-events: none; }
+.welcome-copy,
+.welcome-overview { position: relative; z-index: 1; }
+.workspace-welcome .welcome-eyebrow-mark { background: #eaf4fd; color: #4188c4; }
+.app-header .header-logo { border-color: #d4e6f5; background: linear-gradient(145deg, #f8fcff, #e7f3fd); color: #4288c8; }
+
+@media (max-width: 760px) {
+  .auth-page { align-items: start; padding: 14px; }
+  .auth-layout { grid-template-columns: minmax(0, 1fr); width: min(100%, 470px); min-height: 0; margin: auto; border-radius: 19px; }
+  .auth-visual-panel { display: none; }
+  .auth-card { padding: 30px clamp(22px, 7vw, 38px); }
+  .auth-mobile-brand { display: flex; }
+  .auth-card .auth-eyebrow { margin-top: 0; }
+}
+
+@media (max-width: 420px) {
+  .auth-page { padding: 10px; }
+  .auth-card { padding: 25px 20px; }
+  .welcome-medical-artwork { right: -9%; width: 64%; min-width: 210px; opacity: .15; }
 }

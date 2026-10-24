@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import Button from "../ui/Button";
 import { askTrialQuestion, clearRemoteChat } from "../../api";
 import { deduplicateCitations } from "../../utils/deduplication";
+import Icon from "../ui/Icon";
 
 const SUGGESTED_QUESTIONS = [
   "Why might this patient be excluded from these trials?",
@@ -197,7 +198,7 @@ export default function ChatDrawer({
         {/* ── Header ── */}
         <div className="chat-drawer-header">
           <div className="chat-header-title-group">
-            <div className="chat-avatar-icon">💬</div>
+            <div className="chat-avatar-icon"><Icon name="chat" size={18} /></div>
             <div>
               <h3 id="chat-drawer-title" className="chat-drawer-title">
                 Trial Research Assistant
@@ -256,7 +257,7 @@ export default function ChatDrawer({
         <div className="chat-history-container" aria-live="polite">
           {chatHistory.length === 0 ? (
             <div className="chat-welcome-state">
-              <div className="welcome-icon">💡</div>
+              <div className="welcome-icon"><Icon name="sparkle" size={20} /></div>
               <h4 className="welcome-title">Ask follow-up questions</h4>
               <p className="welcome-desc">
                 Ask specific questions regarding inclusion, exclusion criteria, disease stage, previous therapies, or how the candidate trials compare.
@@ -293,7 +294,7 @@ export default function ChatDrawer({
                   <div className="assistant-card">
                     <div className="assistant-card-header">
                       <div className="assistant-label">
-                        <span className="assistant-icon">✨</span>
+                        <span className="assistant-icon"><Icon name="sparkle" size={14} /></span>
                         <span>Clinical AI Response</span>
                       </div>
                       <button

@@ -1,5 +1,6 @@
 import React from "react";
 import { formatRelativeTime, truncate } from "../../utils/formatters";
+import Icon from "../ui/Icon";
 
 /**
  * Individual session item in the sidebar.
@@ -51,7 +52,7 @@ export default function SessionItem({
             onClick={() => onRename(session)}
             aria-label={`Rename ${title}`}
           >
-            ✎
+            <Icon name="edit" size={15} />
           </button>
           <button
             type="button"
@@ -60,7 +61,7 @@ export default function SessionItem({
             onClick={() => onDelete(session)}
             aria-label={`Delete ${title}`}
           >
-            🗑
+            <Icon name="trash" size={15} />
           </button>
         </div>
       </div>

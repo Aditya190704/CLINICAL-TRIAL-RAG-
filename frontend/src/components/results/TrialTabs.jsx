@@ -11,9 +11,6 @@ export default function TrialTabs({ matches = [], activeTab = 0, onSelectTab }) 
       {matches.slice(0, 3).map((trial, index) => {
         const isActive = index === activeTab;
         const rank = trial.rank ?? index + 1;
-        const unresolved = Array.isArray(trial.criteria)
-          ? trial.criteria.filter((criterion) => criterion.impact === "UNKNOWN").length
-          : 0;
         const citationUrl = trial.url || `https://clinicaltrials.gov/study/${trial.nct_id}`;
 
         return (
@@ -34,14 +31,16 @@ export default function TrialTabs({ matches = [], activeTab = 0, onSelectTab }) 
               <span className="tab-title-text" title={trial.title}>
                 {trial.title || "Untitled Trial"}
               </span>
+              <div className="trial-card-facts">
+                {trial.status && <span className="trial-card-status">{trial.status.replace(/_/g, " ")}</span>}
+                {trial.phases?.length > 0 && <span>{trial.phases.join(", ")}</span>}
+                {trial.conditions?.[0] && <span className="trial-card-condition">{trial.conditions[0]}</span>}
+              </div>
               <div className="tab-bottom-row">
                 <span className="tab-nct-id">{trial.nct_id}</span>
-                <span className="tab-phase">{unresolved} unresolved</span>
-                {trial.phases?.length > 0 && (
-                  <span className="tab-phase">{trial.phases.join(", ")}</span>
-                )}
+                <span className="tab-score-pill">{formatScore(trial.relevance_score)} topic similarity</span>
               </div>
-              <span className="tab-score-pill">{formatScore(trial.relevance_score)} topic similarity</span>
+              <span className="trial-card-view-action">View details <span aria-hidden="true">→</span></span>
             </button>
             <a
               className="tab-citation-link"

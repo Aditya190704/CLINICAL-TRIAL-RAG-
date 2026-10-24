@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import Badge from "../ui/Badge";
+import Icon from "../ui/Icon";
 
 /**
  * Extracted Patient Profile Component.
@@ -66,7 +67,7 @@ export default function PatientProfileCard({
     <div className="patient-profile-card">
       <div className="profile-header">
         <div className="profile-header-title">
-          <span className="profile-header-icon">👤</span>
+          <span className="profile-header-icon"><Icon name="person" size={18} /></span>
           <div>
             <h3 className="profile-title">Extracted Clinical Profile</h3>
             <p className="profile-subtitle">

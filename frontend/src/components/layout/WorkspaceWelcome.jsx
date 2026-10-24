@@ -1,4 +1,6 @@
 import React from "react";
+import MedicalArtwork from "../ui/MedicalArtwork";
+import { formatRelativeTime } from "../../utils/formatters";
 
 function greetingForHour(hour) {
   if (hour < 12) return "Good morning";
@@ -11,6 +13,8 @@ export default function WorkspaceWelcome({
   healthStatus,
   trialCount,
   sessionCount,
+  recentSessions = [],
+  onOpenSession,
   onStartSearch,
   onLoadSample,
   actionsDisabled = false,
@@ -31,6 +35,7 @@ export default function WorkspaceWelcome({
 
   return (
     <section className="workspace-welcome" aria-labelledby="workspace-welcome-title">
+      <MedicalArtwork className="welcome-medical-artwork" />
       <div className="welcome-copy">
         <div className="welcome-eyebrow">
           <span className="welcome-eyebrow-mark" aria-hidden="true">
@@ -59,6 +64,18 @@ export default function WorkspaceWelcome({
             <span aria-hidden="true">→</span>
           </button>
         </div>
+        {recentSessions.length > 0 && (
+          <div className="welcome-recent-sessions" aria-label="Recent saved sessions">
+            <div className="welcome-recent-heading"><span>Recent sessions</span><span>Most recent first</span></div>
+            {recentSessions.slice(0, 2).map((session) => (
+              <button key={session.id} type="button" className="welcome-recent-session" onClick={() => onOpenSession?.(session.id)}>
+                <span className="welcome-recent-icon" aria-hidden="true">↗</span>
+                <span className="welcome-recent-copy"><strong>{session.title || "Clinical trial search"}</strong><small>{session.data?.matches?.length || 0} matched trials</small></span>
+                <time>{formatRelativeTime(session.updatedAt || session.createdAt)}</time>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="welcome-overview" aria-label="Workspace status">

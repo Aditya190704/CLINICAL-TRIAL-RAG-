@@ -316,6 +316,8 @@ function ClinicalWorkspace({ authUser, onLogout }) {
         healthStatus={healthStatus}
         trialCount={trialCount}
         sessionCount={sessions.length}
+        recentSessions={sessions}
+        onOpenSession={(id) => switchSession(id)}
         onStartSearch={handleStartSearch}
         onLoadSample={handleLoadSample}
         actionsDisabled={sessionsLoading}
@@ -523,10 +525,13 @@ function ClinicalWorkspace({ authUser, onLogout }) {
           />
 
           {/* Extracted Patient Profile */}
-          <PatientProfileCard
-            profile={currentData.patient_profile}
-            patientCase={patientText}
-          />
+          <details className="patient-profile-disclosure">
+            <summary>View extracted patient profile</summary>
+            <PatientProfileCard
+              profile={currentData.patient_profile}
+              patientCase={patientText}
+            />
+          </details>
 
           {/* Top Trial Shortlist */}
           {currentMatches.length > 0 ? (

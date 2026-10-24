@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { useAuth } from "./AuthContext";
+import MedicalArtwork from "../components/ui/MedicalArtwork";
 
 function readableAuthError(error) {
   const code = error?.code || "";
@@ -45,8 +46,25 @@ export default function AuthScreen() {
 
   return (
     <main className="auth-page">
-      <section className="auth-card" aria-labelledby="auth-title">
-        <div className="auth-brand-mark" aria-hidden="true">CT</div>
+      <div className="auth-layout">
+        <aside className="auth-visual-panel" aria-label="Clinical research workspace">
+          <div className="auth-visual-brand">
+            <span className="auth-brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 32 32" fill="none"><path d="M16 3 27 9v8c0 6.4-4.6 10.4-11 12C9.6 27.4 5 23.4 5 17V9l11-6Z" stroke="currentColor" strokeWidth="1.8"/><path d="M16 10v12M10 16h12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"/></svg>
+            </span>
+            <span>Clinical Trial Matcher</span>
+          </div>
+          <div className="auth-artwork-wrap"><MedicalArtwork className="auth-medical-artwork" /></div>
+          <div className="auth-visual-copy">
+            <span className="auth-visual-kicker"><i /> RESEARCH WORKSPACE</span>
+            <h2>Evidence for every step of trial review.</h2>
+            <p>Explore trial criteria and source evidence in one secure workspace for clinical research teams.</p>
+          </div>
+          <div className="auth-visual-footer"><span aria-hidden="true">✚</span> Built for clinical research review</div>
+        </aside>
+
+        <section className="auth-card" aria-labelledby="auth-title">
+        <div className="auth-mobile-brand" aria-hidden="true"><span className="auth-brand-mark"><svg viewBox="0 0 32 32" fill="none"><path d="M16 3 27 9v8c0 6.4-4.6 10.4-11 12C9.6 27.4 5 23.4 5 17V9l11-6Z" stroke="currentColor" strokeWidth="1.8"/><path d="M16 10v12M10 16h12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"/></svg></span>Clinical Trial Matcher</div>
         <p className="auth-eyebrow">CLINICAL TRIAL MATCHER</p>
         <h1 id="auth-title">{isSignup ? "Create your technician account" : "Sign in to your workspace"}</h1>
         <p className="auth-subtitle">Secure access for clinical technicians.</p>
@@ -90,7 +108,8 @@ export default function AuthScreen() {
           </p>
         )}
         <p className="auth-role-note">Application access is assigned as Clinical Technician.</p>
-      </section>
+        </section>
+      </div>
     </main>
   );
 }

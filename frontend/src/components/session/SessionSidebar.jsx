@@ -3,6 +3,7 @@ import SessionItem from "./SessionItem";
 import RenameModal from "./RenameModal";
 import ConfirmDialog from "../ui/ConfirmDialog";
 import Button from "../ui/Button";
+import Icon from "../ui/Icon";
 
 /**
  * Right-hand Session History & Management Sidebar.
@@ -85,7 +86,7 @@ export default function SessionSidebar({
         {/* Search input if multiple sessions exist */}
         {sessions.length > 1 && (
           <div className="sidebar-search">
-            <span className="search-icon">🔍</span>
+            <span className="search-icon"><Icon name="search" size={15} /></span>
             <input
               type="text"
               className="sidebar-search-input"
@@ -127,7 +128,7 @@ export default function SessionSidebar({
                 </>
               ) : (
                 <>
-                  <div className="sidebar-empty-icon">📁</div>
+                  <div className="sidebar-empty-icon"><Icon name="folder" size={22} /></div>
                   <p className="sidebar-empty-title">No saved sessions</p>
                   <p className="sidebar-empty-text">
                     Your saved sessions and trial evaluations will appear here.
@@ -157,7 +158,7 @@ export default function SessionSidebar({
         {/* Footer controls and account-scoped storage note */}
         <div className="sidebar-footer">
           <div className="sidebar-footer-info">
-            <span className="info-icon">ⓘ</span>
+            <span className="info-icon"><Icon name="info" size={14} /></span>
             <span>Search queries, trial assessments, and chat are saved to your account. Delete a session to remove it.</span>
           </div>
 
