@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   clearRemoteSessions,
   createSession as createRemoteSession,
@@ -13,7 +13,7 @@ function normalizeSession(session) {
   return {
     id: session.id,
     title: session.title || "New Patient Session",
-    patientCase: "",
+    patientCase: session.searchQuery || "",
     data: session.data || null,
     activeTab: 0,
     chatHistory: session.chatHistory || [],
@@ -27,6 +27,8 @@ export function useSessionManager(user) {
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [loadingSessionId, setLoadingSessionId] = useState(null);
+  const switchRequest = useRef(0);
 
   useEffect(() => {
     let mounted = true;
@@ -68,24 +70,34 @@ export function useSessionManager(user) {
   );
 
   const switchSession = useCallback(async (id) => {
-    setActiveSessionId(id);
+    const requestId = ++switchRequest.current;
+    setLoadingSessionId(id);
     setError("");
     try {
       const detail = await getSession(id);
+      if (requestId !== switchRequest.current) return;
       setSessions((current) => current.map((item) => item.id === id
         ? { ...item, ...normalizeSession(detail) }
         : item));
+      setActiveSessionId(id);
+      return true;
     } catch (loadError) {
-      setError(loadError.message || "Could not open this session.");
+      if (requestId === switchRequest.current) setError(loadError.message || "Could not open this session.");
+      return false;
+    } finally {
+      if (requestId === switchRequest.current) setLoadingSessionId(null);
     }
   }, []);
 
-  const createNewSession = useCallback(async () => {
+  const createNewSession = useCallback(async (title) => {
+    switchRequest.current += 1;
+    setLoadingSessionId(null);
     setError("");
     try {
-      const created = normalizeSession(await createRemoteSession());
+      const created = normalizeSession(await createRemoteSession(title));
       setSessions((current) => [created, ...current]);
       setActiveSessionId(created.id);
+      setError("");
       return created;
     } catch (createError) {
       setError(createError.message || "Could not create a session.");
@@ -93,30 +105,42 @@ export function useSessionManager(user) {
     }
   }, []);
 
-  const updateActiveSession = useCallback((patch) => {
-    if (!activeSessionId) return;
-    setSessions((current) => current.map((session) => {
-      if (session.id !== activeSessionId) return session;
-      const updated = { ...session, ...patch, updatedAt: new Date().toISOString() };
-      if (patch.title && patch.title !== session.title) {
-        renameRemoteSession(session.id, patch.title).catch((renameError) => {
-          setError(renameError.message || "Could not save the session name.");
-        });
+  const updateSession = useCallback((id, patch) => {
+    if (!id) return;
+    const { touch = false, ...sessionPatch } = patch;
+    setSessions((current) => {
+      const next = current.map((session) => {
+        if (session.id !== id) return session;
+        const updated = { ...session, ...sessionPatch, updatedAt: new Date().toISOString() };
+        if (sessionPatch.title && sessionPatch.title !== session.title) {
+          renameRemoteSession(id, sessionPatch.title).catch((renameError) => {
+            setError(renameError.message || "Could not save the session name.");
+          });
+        }
+        return updated;
+      });
+      if (touch || sessionPatch.data || sessionPatch.chatHistory || sessionPatch.title) {
+        next.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
       }
-      // Patient narratives stay in memory only. Match results and chat are
-      // persisted by their authenticated backend workflows.
-      return updated;
-    }));
-  }, [activeSessionId]);
+      return next;
+    });
+  }, []);
+
+  const updateActiveSession = useCallback((patch) => {
+    updateSession(activeSessionId, patch);
+  }, [activeSessionId, updateSession]);
 
   const renameSession = useCallback(async (id, title) => {
     const cleanTitle = title?.trim().slice(0, 100);
     if (!cleanTitle) return;
     try {
       await renameRemoteSession(id, cleanTitle);
-      setSessions((current) => current.map((item) => item.id === id
-        ? { ...item, title: cleanTitle, updatedAt: new Date().toISOString() }
-        : item));
+      setSessions((current) => {
+        const renamed = current.map((item) => item.id === id
+          ? { ...item, title: cleanTitle, updatedAt: new Date().toISOString() }
+          : item);
+        return renamed.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+      });
     } catch (renameError) {
       setError(renameError.message || "Could not rename this session.");
     }
@@ -150,10 +174,12 @@ export function useSessionManager(user) {
     activeSessionId,
     activeSession,
     loading,
+    loadingSessionId,
     error,
     switchSession,
     createNewSession,
     updateActiveSession,
+    updateSession,
     renameSession,
     deleteSession,
     clearAllSessions,

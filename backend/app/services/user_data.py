@@ -6,8 +6,6 @@ from typing import Any
 
 from app.services.firebase_auth import firestore_client
 
-MAX_SESSIONS = 100
-MAX_CHAT_MESSAGES = 200
 
 
 def _timestamp_value(value: Any) -> str | None:
@@ -89,9 +87,55 @@ def create_session(uid: str, title: str = "New Patient Session") -> dict[str, An
     return {"id": ref.id, "title": title or "New Patient Session", "status": "draft", "matchedTrialIds": [], "resultSummary": None}
 
 
+def save_search_query(uid: str, session_id: str, search_query: str) -> bool:
+    """Save a validated search to its owner's session before matching starts."""
+    from firebase_admin import firestore
+
+    ref = _session_ref(uid, session_id)
+    if not ref.get().exists:
+        return False
+    ref.update({
+        "searchQuery": search_query,
+        "searchedAt": firestore.SERVER_TIMESTAMP,
+        "status": "searching",
+        "matchedTrialIds": [],
+        "resultSummary": None,
+        "updatedAt": firestore.SERVER_TIMESTAMP,
+    })
+    return True
+
+
+def mark_search_failed(uid: str, session_id: str) -> None:
+    """Leave a durable query in a clear retryable state after matching fails."""
+    from firebase_admin import firestore
+
+    ref = _session_ref(uid, session_id)
+    if ref.get().exists:
+        ref.update({"status": "failed", "updatedAt": firestore.SERVER_TIMESTAMP})
+
+
+def _sidebar_result_summary(result: Any) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
+    matches = []
+    for match in result.get("matches", []):
+        if not isinstance(match, dict):
+            continue
+        matches.append({
+            key: match.get(key)
+            for key in ("nct_id", "title", "verdict", "relevance_score")
+            if key in match
+        })
+    return {
+        "matches": matches,
+        "disclaimer": result.get("disclaimer", ""),
+        "result_message": result.get("result_message"),
+    }
+
+
 def list_sessions(uid: str) -> list[dict[str, Any]]:
     ref = firestore_client().collection("users").document(uid).collection("sessions")
-    docs = ref.order_by("updatedAt", direction="DESCENDING").limit(MAX_SESSIONS).stream()
+    docs = ref.order_by("updatedAt", direction="DESCENDING").stream()
     result = []
     for doc in docs:
         data = doc.to_dict() or {}
@@ -100,9 +144,11 @@ def list_sessions(uid: str) -> list[dict[str, Any]]:
             "title": data.get("title") or "Untitled Session",
             "createdAt": _timestamp_value(data.get("createdAt")),
             "updatedAt": _timestamp_value(data.get("updatedAt")),
+            "searchedAt": _timestamp_value(data.get("searchedAt")),
             "status": data.get("status", "draft"),
             "matchedTrialIds": data.get("matchedTrialIds", []),
-            "data": data.get("resultSummary"),
+            "searchQuery": data.get("searchQuery", ""),
+            "data": _sidebar_result_summary(data.get("resultSummary")),
         })
     return result
 
@@ -115,7 +161,6 @@ def get_session(uid: str, session_id: str) -> dict[str, Any] | None:
     messages = (
         snapshot.reference.collection("messages")
         .order_by("createdAt", direction="DESCENDING")
-        .limit(MAX_CHAT_MESSAGES)
         .stream()
     )
     by_turn: dict[str, dict[str, Any]] = {}
@@ -134,8 +179,10 @@ def get_session(uid: str, session_id: str) -> dict[str, Any] | None:
         "title": data.get("title") or "Untitled Session",
         "createdAt": _timestamp_value(data.get("createdAt")),
         "updatedAt": _timestamp_value(data.get("updatedAt")),
+        "searchedAt": _timestamp_value(data.get("searchedAt")),
         "status": data.get("status", "draft"),
         "matchedTrialIds": data.get("matchedTrialIds", []),
+        "searchQuery": data.get("searchQuery", ""),
         "data": data.get("resultSummary"),
         "chatHistory": list(by_turn.values()),
     }
@@ -158,27 +205,10 @@ def save_match_result(uid: str, session_id: str, response: dict[str, Any]) -> bo
     if not ref.get().exists:
         return False
 
-    matches = []
-    for match in response.get("matches", [])[:3]:
-        item = dict(match)
-        # Persist the trial evidence and verified assessment without retaining
-        # a verbatim copy of the patient narrative or profile facts.
-        item.pop("passages", None)
-        item["summary"] = ""
-        item["criteria"] = [
-            {
-                key: criterion.get(key)
-                for key in ("source", "criterion_type", "criterion_quote", "impact")
-                if key in criterion
-            } | {"patient_evidence": None, "explanation": ""}
-            for criterion in item.get("criteria", [])
-        ]
-        matches.append(item)
-    summary = {
-        "matches": matches,
-        "disclaimer": response.get("disclaimer", ""),
-        "result_message": response.get("result_message"),
-    }
+    # Keep the full structured response so reopening restores criteria,
+    # evidence, and trial summaries exactly as they were presented.
+    summary = response
+    matches = summary.get("matches", [])
     ref.update({
         "status": "matched",
         "matchedTrialIds": [item.get("nct_id") for item in matches if item.get("nct_id")],
@@ -271,6 +301,8 @@ def clear_match_result(uid: str, session_id: str) -> bool:
         return False
     ref.update({
         "status": "draft",
+        "searchQuery": "",
+        "searchedAt": None,
         "matchedTrialIds": [],
         "resultSummary": None,
         "updatedAt": firestore.SERVER_TIMESTAMP,

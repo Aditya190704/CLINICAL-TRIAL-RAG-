@@ -45,8 +45,8 @@ def _contains_possible_direct_identifier(case: str) -> bool:
     return any(pattern.search(case) for pattern in PHI_PATTERNS.values())
 
 
-async def run_async(case: str, request_id: str | None = None) -> MatchResponse:
-    """Validate, apply deterministic safety screening, then call the workflow."""
+def validate_case(case: str) -> str:
+    """Validate and normalize a case before any durable storage occurs."""
     case = _validate_case(case)
     if _contains_possible_direct_identifier(case):
         raise ValueError(
@@ -54,6 +54,12 @@ async def run_async(case: str, request_id: str | None = None) -> MatchResponse:
             "email address, phone number, or SSN. Remove direct identifiers and "
             "submit an anonymized clinical summary."
         )
+    return case
+
+
+async def run_async(case: str, request_id: str | None = None) -> MatchResponse:
+    """Validate, apply deterministic safety screening, then call the workflow."""
+    case = validate_case(case)
 
     request_id = request_id or str(uuid4())
     token = set_request_id(request_id)

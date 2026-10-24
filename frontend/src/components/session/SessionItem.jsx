@@ -19,7 +19,7 @@ export default function SessionItem({
     (m) => m.verdict === "ELIGIBLE" || m.verdict === "LIKELY ELIGIBLE"
   ).length;
 
-  const snippet = patientCase ? truncate(patientCase, 85) : "Blank session (no case entered yet)";
+  const snippet = patientCase ? truncate(patientCase, 85) : "Ready for a new clinical search";
 
   return (
     <div
@@ -80,7 +80,7 @@ export default function SessionItem({
         ) : patientCase ? (
           <span className="session-badge session-badge-draft">Ready to match</span>
         ) : (
-          <span className="session-badge session-badge-empty">Empty draft</span>
+          <span className="session-badge session-badge-empty">Ready to search</span>
         )}
       </div>
     </div>

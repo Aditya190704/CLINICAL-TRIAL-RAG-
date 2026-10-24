@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.services.auth_dependency import require_firebase_user
 from app.schemas import (
     CriterionResult, JudgeOutput, JudgedCriterion, MatchResponse,
     PatientExtractionOutput, PatientProfile, RefinementOutput,
@@ -13,6 +14,30 @@ from app.services.retriever import Candidate
 
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def authenticated_api_user():
+    """Keep route tests authenticated without contacting Firebase or Firestore."""
+    app.dependency_overrides[require_firebase_user] = lambda: {
+        "uid": "test-user",
+        "email": "test@example.com",
+        "display_name": "Test User",
+    }
+    with (
+        patch("app.main.user_data.create_session", return_value={"id": "test-session"}),
+        patch("app.main.user_data.get_session", return_value={
+            "id": "test-session",
+            "matchedTrialIds": ["NCT00000001"],
+        }),
+        patch("app.main.user_data.save_search_query", return_value=True),
+        patch("app.main.user_data.mark_search_failed"),
+        patch("app.main.user_data.save_match_result", return_value=True),
+        patch("app.main.user_data.load_chat_turn", return_value=None),
+        patch("app.main.user_data.persist_chat_turn", return_value=True),
+    ):
+        yield
+    app.dependency_overrides.pop(require_firebase_user, None)
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +76,38 @@ def test_urgent_case_returns_notice_without_workflow_calls():
     assert data["matches"] == []
     assert data["disclaimer"]
     workflow.assert_not_awaited()
+
+
+def test_match_persists_validated_query_on_owned_session():
+    case = "62-year-old patient with stage III lung cancer and documented EGFR mutation."
+    response = MatchResponse(
+        patient_profile=PatientProfile(search_query="stage III lung cancer EGFR"),
+        matches=[],
+        disclaimer="For clinical review.",
+    )
+    with (
+        patch("app.main.user_data.save_search_query", return_value=True) as save_query,
+        patch("app.main.pipeline.run_async", new_callable=AsyncMock, return_value=response),
+    ):
+        result = client.post("/api/match", json={"patient_case": case, "session_id": "test-session"})
+    assert result.status_code == 200
+    save_query.assert_called_once_with("test-user", "test-session", case)
+    assert result.json()["session_id"] == "test-session"
+
+
+def test_match_does_not_persist_direct_identifiers():
+    case = "Patient email clinician@example.org has stage III lung cancer and needs matching."
+    with patch("app.main.user_data.save_search_query") as save_query:
+        result = client.post("/api/match", json={"patient_case": case})
+    assert result.status_code == 400
+    save_query.assert_not_called()
+
+
+def test_session_read_rejects_a_session_outside_the_authenticated_scope():
+    with patch("app.main.user_data.get_session", return_value=None) as get_owned_session:
+        result = client.get("/api/sessions/another-users-session")
+    assert result.status_code == 403
+    get_owned_session.assert_called_once_with("test-user", "another-users-session")
 
 
 def test_urgent_screen_failure_fails_closed_and_does_not_log_input(caplog):
@@ -241,6 +298,7 @@ def test_chat_error_does_not_log_or_echo_question(caplog):
         response = client.post("/api/trials/chat", json={
             "question": f"{secret} what does the trial say about eligibility?",
             "trial_ids": ["NCT00000001"],
+            "session_id": "test-session",
         })
     assert response.status_code == 500
     assert secret not in caplog.text

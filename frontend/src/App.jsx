@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from "react";
 import AppShell from "./components/layout/AppShell";
 import Header from "./components/layout/Header";
+import WorkspaceWelcome from "./components/layout/WorkspaceWelcome";
 import Footer from "./components/layout/Footer";
 import SessionSidebar from "./components/session/SessionSidebar";
 import ResultsOverview from "./components/results/ResultsOverview";
+import ClinicalAssessmentPage from "./components/results/ClinicalAssessmentPage";
 import PatientProfileCard from "./components/results/PatientProfileCard";
 import TrialTabs from "./components/results/TrialTabs";
 import TrialDetailView from "./components/results/TrialDetailView";
@@ -28,17 +30,25 @@ const MATCH_STEPS = [
 ];
 
 function ClinicalWorkspace({ authUser, onLogout }) {
+  const displayName = (
+    authUser.profile.displayName
+    || authUser.firebaseUser.displayName
+    || authUser.firebaseUser.email?.split("@")[0]
+    || "Clinical Technician"
+  ).trim();
   const {
     sessions,
     activeSessionId,
     activeSession,
     switchSession,
     createNewSession,
+    updateSession,
     updateActiveSession,
     renameSession,
     deleteSession,
     clearAllSessions,
     loading: sessionsLoading,
+    loadingSessionId,
     error: sessionsError,
   } = useSessionManager(authUser);
 
@@ -49,20 +59,44 @@ function ClinicalWorkspace({ authUser, onLogout }) {
   const [loading, setLoading] = useState(false);
   const [matchStep, setMatchStep] = useState(0);
   const [error, setError] = useState("");
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(() => (
+    typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches
+  ));
   const [isChatOpen, setIsChatOpen] = useState(false);
-  const [healthStatus, setHealthStatus] = useState("online");
-  const [trialCount, setTrialCount] = useState(484);
+  const [isAssessmentPageOpen, setIsAssessmentPageOpen] = useState(false);
+  const [healthStatus, setHealthStatus] = useState("checking");
+  const [trialCount, setTrialCount] = useState(0);
 
   const resultsRef = useRef(null);
+  const patientInputRef = useRef(null);
+
+  const handleStartSearch = () => {
+    patientInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => patientInputRef.current?.focus(), 250);
+  };
+
+  const handleOpenAssessment = () => {
+    if (!activeSession?.data) return;
+    setIsChatOpen(false);
+    setIsAssessmentPageOpen(true);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const handleBackToResults = () => {
+    setIsAssessmentPageOpen(false);
+    window.setTimeout(() => {
+      resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
+  };
 
   // Sync local text input when active session changes
   useEffect(() => {
     if (activeSession) {
       setPatientText(activeSession.patientCase || "");
       setError("");
+      setIsAssessmentPageOpen(false);
     }
-  }, [activeSession?.id]);
+  }, [activeSession?.id, activeSession?.patientCase]);
 
   // Check backend health on mount
   useEffect(() => {
@@ -72,7 +106,7 @@ function ClinicalWorkspace({ authUser, onLogout }) {
         if (!mounted) return;
         if (res && res.status === "ok") {
           setHealthStatus("online");
-          if (res.trials_indexed) setTrialCount(res.trials_indexed);
+          if (Number.isFinite(res.trials_indexed)) setTrialCount(res.trials_indexed);
         } else {
           setHealthStatus("offline");
         }
@@ -111,15 +145,20 @@ function ClinicalWorkspace({ authUser, onLogout }) {
     setError("");
 
     try {
-      if (!activeSessionId) throw new Error("Your session is still loading. Please try again.");
-      const result = await matchPatient(cleanCase, activeSessionId);
+      if (!activeSessionId || !activeSession) throw new Error("Your session is still loading. Please try again.");
+      let searchSession = activeSession;
+      if (activeSession.data) {
+        const title = `Trial search · ${new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`;
+        searchSession = await createNewSession(title);
+      }
+      updateSession(searchSession.id, { patientCase: cleanCase, touch: true });
+      const result = await matchPatient(cleanCase, searchSession.id);
 
       if (!result || !Array.isArray(result.matches)) {
         throw new Error("Invalid response format received from matching service.");
       }
 
-      // Save match result to current active session
-      updateActiveSession({
+      updateSession(searchSession.id, {
         patientCase: cleanCase,
         data: result,
         activeTab: 0,
@@ -155,6 +194,10 @@ function ClinicalWorkspace({ authUser, onLogout }) {
   const handleLoadSample = () => {
     setPatientText(SAMPLE_CASE);
     updateActiveSession({ patientCase: SAMPLE_CASE });
+    window.setTimeout(() => {
+      patientInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      patientInputRef.current?.focus();
+    }, 0);
     showToast("Loaded sample NSCLC clinical case", "info");
   };
 
@@ -220,10 +263,9 @@ function ClinicalWorkspace({ authUser, onLogout }) {
               .then(() => showToast("Started a new patient matching session", "info"))
               .catch((err) => showToast(err.message || "Could not start a session.", "error"));
           }}
-          onLoadSample={handleLoadSample}
-          hasResults={currentMatches.length > 0}
-          onOpenChat={() => setIsChatOpen(true)}
-          displayName={authUser.profile.displayName || authUser.firebaseUser.email}
+          hasAssessment={Boolean(currentData) && !isAssessmentPageOpen}
+          onOpenAssessment={handleOpenAssessment}
+          displayName={displayName}
           onLogout={onLogout}
         />
       }
@@ -234,8 +276,9 @@ function ClinicalWorkspace({ authUser, onLogout }) {
           sessions={sessions}
           activeSessionId={activeSessionId}
           onSelectSession={(id) => {
-            switchSession(id);
-            showToast("Loaded session", "info");
+            switchSession(id).then((opened) => {
+              if (opened) showToast("Loaded session", "info");
+            });
           }}
           onNewSession={() => {
             createNewSession()
@@ -259,8 +302,27 @@ function ClinicalWorkspace({ authUser, onLogout }) {
       footer={<Footer />}
     >
       {/* ── Main Input Card ── */}
+      {isAssessmentPageOpen && currentData ? (
+        <ClinicalAssessmentPage
+          data={currentData}
+          patientCase={patientText}
+          sessionTitle={activeSession?.title}
+          onBack={handleBackToResults}
+        />
+      ) : (
+        <>
+      <WorkspaceWelcome
+        displayName={displayName}
+        healthStatus={healthStatus}
+        trialCount={trialCount}
+        sessionCount={sessions.length}
+        onStartSearch={handleStartSearch}
+        onLoadSample={handleLoadSample}
+        actionsDisabled={sessionsLoading}
+      />
+
       <section className="input-panel-section">
-        {sessionsLoading && <div className="session-loading-note" role="status">Loading your secure sessions…</div>}
+        {(sessionsLoading || loadingSessionId) && <div className="session-loading-note" role="status">{loadingSessionId ? "Opening your saved session…" : "Loading your secure sessions…"}</div>}
         {sessionsError && <div className="auth-alert" role="alert">{sessionsError}</div>}
         <div className="section-header-row">
           <div>
@@ -297,6 +359,7 @@ function ClinicalWorkspace({ authUser, onLogout }) {
         <form onSubmit={handleSubmit} className="case-input-form">
           <div className="textarea-wrapper">
             <textarea
+              ref={patientInputRef}
               className="patient-textarea"
               value={patientText}
               onChange={handleTextChange}
@@ -392,31 +455,31 @@ function ClinicalWorkspace({ authUser, onLogout }) {
         <section className="empty-state-panel">
           <div className="empty-state-card">
             <div className="empty-illustration">🔬</div>
-            <h3 className="empty-title">Ready to find recruiting clinical trials</h3>
+            <h3 className="empty-title">A clear path from case details to trial evidence</h3>
             <p className="empty-description">
-              Paste an anonymized case above and click <strong>Find Matching Trials</strong>. The system will retrieve the most relevant studies and audit every inclusion and exclusion criterion against your case.
+              Add an anonymized clinical summary above. Your shortlist will include sourced eligibility evidence to support a careful review.
             </p>
 
             <div className="empty-features-grid">
               <div className="feature-pill">
                 <span className="feature-icon">⚡</span>
                 <div>
-                  <strong>BigQuery Vector Search</strong>
-                  <p>Dense semantic retrieval across 1,600+ trial criteria chunks</p>
+                  <strong>Start with clinical context</strong>
+                  <p>Include diagnosis, stage, biomarkers, and prior treatment when available.</p>
                 </div>
               </div>
               <div className="feature-pill">
                 <span className="feature-icon">🛡️</span>
                 <div>
-                  <strong>Evidence-Verified Verdicts</strong>
-                  <p>Every criterion decision requires verbatim proof from source trial text</p>
+                  <strong>Review eligibility evidence</strong>
+                  <p>Compare inclusion and exclusion criteria with the documented case facts.</p>
                 </div>
               </div>
               <div className="feature-pill">
                 <span className="feature-icon">💬</span>
                 <div>
-                  <strong>Trial Q&A Assistant</strong>
-                  <p>Ask follow-up questions grounded strictly in the matched studies</p>
+                  <strong>Continue the discussion</strong>
+                  <p>Ask follow-up questions using the evidence from your selected studies.</p>
                 </div>
               </div>
             </div>
@@ -515,6 +578,9 @@ function ClinicalWorkspace({ authUser, onLogout }) {
       )}
 
       {/* ── Slide-over Chat Drawer ── */}
+        </>
+      )}
+
       <ChatDrawer
         isOpen={isChatOpen}
         onClose={() => setIsChatOpen(false)}

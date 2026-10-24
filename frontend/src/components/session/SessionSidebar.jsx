@@ -56,7 +56,7 @@ export default function SessionSidebar({
       >
         <div className="sidebar-header">
           <div className="sidebar-header-left">
-            <span className="sidebar-title">Saved Sessions</span>
+            <span className="sidebar-title">My Sessions</span>
             <span className="sidebar-count">{sessions.length}</span>
           </div>
 
@@ -130,8 +130,7 @@ export default function SessionSidebar({
                   <div className="sidebar-empty-icon">📁</div>
                   <p className="sidebar-empty-title">No saved sessions</p>
                   <p className="sidebar-empty-text">
-                    Your searches and trial evaluations will be saved here
-                    automatically during this tab's session.
+                    Your saved sessions and trial evaluations will appear here.
                   </p>
                 </>
               )}
@@ -155,11 +154,11 @@ export default function SessionSidebar({
           )}
         </div>
 
-        {/* Footer controls & storage notice */}
+        {/* Footer controls and account-scoped storage note */}
         <div className="sidebar-footer">
           <div className="sidebar-footer-info">
             <span className="info-icon">ⓘ</span>
-            <span>Tab-scoped session storage (cleared when tab closes).</span>
+            <span>Search queries, trial assessments, and chat are saved to your account. Delete a session to remove it.</span>
           </div>
 
           {sessions.length > 1 && (
@@ -205,7 +204,7 @@ export default function SessionSidebar({
         <ConfirmDialog
           isOpen={true}
           title="Clear All Sessions"
-          message="Are you sure you want to remove all saved sessions from this tab? This will reset your workspace."
+          message="Are you sure you want to remove all saved sessions from your account? This will delete their trial assessments and chat history."
           confirmText="Clear All"
           confirmVariant="danger"
           onClose={() => setIsClearAllOpen(false)}

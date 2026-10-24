@@ -14,14 +14,27 @@ export default function Header({
   onLoadSample,
   hasResults = false,
   onOpenChat,
+  hasAssessment = false,
+  onOpenAssessment,
   displayName = "",
   onLogout,
 }) {
+  const initials = displayName
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0].toUpperCase())
+    .join("") || "CT";
+
   return (
     <header className="app-header">
       <div className="header-left">
         <div className="header-brand">
           <div className="header-logo" aria-hidden="true">
+            <svg className="logo-medical-mark" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+              <path d="M16 2.8 27.2 9v8.1c0 6.5-4.7 10.4-11.2 12.1C9.5 27.5 4.8 23.6 4.8 17.1V9L16 2.8Z" stroke="currentColor" strokeWidth="1.8" />
+              <path d="M16 10v12M10 16h12" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+            </svg>
             <span className="logo-symbol">✚</span>
           </div>
           <div className="brand-text">
@@ -40,19 +53,38 @@ export default function Header({
         <div className="system-status-indicator" title="Backend operational status">
           <span
             className={`status-pulse-dot ${
-              healthStatus === "online" ? "status-online" : "status-offline"
+              healthStatus === "online" ? "status-online" : healthStatus === "checking" ? "status-checking" : "status-offline"
             }`}
           />
           <span className="status-text">
             {healthStatus === "online"
-              ? `${trialCount} Trials Indexed`
-              : "Connecting to API..."}
+              ? (trialCount ? `${trialCount.toLocaleString()} Trials Indexed` : "Trial search online")
+              : healthStatus === "checking"
+                ? "Connecting to trial service…"
+                : "Trial service unavailable"}
           </span>
         </div>
       </div>
 
       <div className="header-right">
-        {displayName && <span className="signed-in-label">{displayName}</span>}
+        {displayName && (
+          <div className="header-user-chip" title={`${displayName} · Clinical Technician`}>
+            <span className="header-user-avatar" aria-hidden="true">{initials}</span>
+            <span className="signed-in-label">{displayName}</span>
+          </div>
+        )}
+        {hasAssessment && onOpenAssessment && (
+          <Button
+            variant="subtle"
+            size="sm"
+            onClick={onOpenAssessment}
+            title="Open the clinical assessment summary"
+            aria-label="Open clinical assessment summary"
+            icon={<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 2.8h7l3 3v11.4H5V2.8Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" /><path d="M12 2.8v3.4h3M7.5 9h5M7.5 12h5M7.5 15h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>}
+          >
+            Assessment Summary
+          </Button>
+        )}
         {onLoadSample && (
           <Button
             variant="ghost"

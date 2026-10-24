@@ -15,7 +15,7 @@ Clinical Trial RAG helps a clinician or researcher review de-identified patient 
 - [Project Structure](#project-structure)
 - [Testing](#testing)
 - [Deployment](#deployment)
-- [Security Status and Planned Work](#security-status-and-planned-work)
+- [Security](#security)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -33,6 +33,7 @@ Every result is preliminary. A qualified clinical team must review the official 
 - Use one initial retrieval and at most one profile-grounded refinement retrieval.
 - Return up to three non-excluded trials and separate verified exclusions.
 - Verify model-provided trial and patient quotes before using criterion assessments.
+- Review search provenance, evidence coverage, missing facts, and conflicts in an evidence traceability dashboard; download a cited, print-ready report from the browser.
 - Return `EXCLUDED` for a verified blocker, `COULD_NOT_ASSESS` when no criterion has supported evidence, and otherwise `POSSIBLY_ELIGIBLE`. This system does not claim likely eligibility because it assesses only a bounded subset of trial criteria.
 - Mark criteria that lack enough evidence as `UNKNOWN` (`Could not assess` in the UI).
 - Answer follow-up questions from evidence belonging only to validated selected trial IDs.
@@ -47,8 +48,9 @@ Every result is preliminary. A qualified clinical team must review the official 
 5. If no candidates are found or the best cosine similarity is below `0.35`, one ADK refinement proposal may be requested. The backend accepts it only when all terms occur in validated profile facts and it adds a useful term. The retrieval wrapper enforces at most two calls total.
 6. The top candidates are capped at `min(CANDIDATES_TO_JUDGE, 10)`. Independent assessments run concurrently up to `ADK_CONCURRENCY`; outstanding calls are cancelled and cleaned up if the workflow fails or times out. Ordinary code verifies quotes and computes conservative verdicts. Up to three non-excluded trials are ordered by verdict, fewer unresolved criteria, similarity descending, then NCT ID ascending. Excluded trials and their verified blocking reasons appear separately.
 7. Follow-up chat validates trial IDs and retrieves evidence only from those selected trials. An ADK chat agent answers from that evidence and reports when it is insufficient.
+8. The frontend summarizes validated search facts and criterion coverage across the shortlist. It creates a print-ready HTML report with official study links locally on demand.
 
-ADK agents have no arbitrary shell, filesystem, network, SQL, or Google Cloud tools. Backend code controls the existing retrieval and evidence services. Each model task uses a fresh in-memory ADK session, deleted after the call. No ADK session service or chat memory is persisted.
+ADK agents have no arbitrary shell, filesystem, network, SQL, or Google Cloud tools. Backend code controls the existing retrieval and evidence services. Each model task uses a fresh in-memory ADK session, deleted after the call. ADK session state is not persisted; user chat turns are stored separately in Firestore under the owning session.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for Mermaid flowcharts, sequence, data, and deployment diagrams.
 
@@ -190,27 +192,31 @@ python -m ingestion.ingest --refresh
 
 ```text
 .
-├── backend/
-│   ├── app/
-│   │   ├── agents/       # ADK runtime, task agents, bounded workflow/tools
-│   │   ├── services/     # API pipeline, retrieval, safety, evidence verification
-│   │   ├── urgent_signs.json
-│   │   ├── config.py
-│   │   ├── main.py
-│   │   └── schemas.py
-│   ├── data/processed/   # Local trial and chunk data
-│   ├── ingestion/        # Registry fetch, chunking, embedding ingestion
-│   ├── sql/              # BigQuery initialization and verification
-│   ├── tests/
-│   └── requirements.txt
-├── frontend/
-│   ├── src/components/
-│   ├── src/App.jsx
-│   ├── src/api.js
-│   ├── package.json
-│   └── vite.config.js
-├── ARCHITECTURE.md
-└── README.md
+|-- backend/
+|   |-- app/
+|   |   |-- agents/          # ADK runtime, task agents, tools, workflow
+|   |   |-- services/        # Auth, Firestore, matching, retrieval, chat, safety
+|   |   |-- main.py          # FastAPI routes and middleware
+|   |   |-- schemas.py       # Request and response models
+|   |   `-- config.py        # Environment-backed settings
+|   |-- data/                # Raw and processed trial data
+|   |-- ingestion/           # Fetching, chunking, embeddings, ingestion
+|   |-- sql/                 # BigQuery setup and verification SQL
+|   |-- tests/               # Backend automated tests
+|   `-- requirements.txt
+|-- frontend/
+|   |-- src/
+|   |   |-- auth/            # Firebase auth context and sign-in screen
+|   |   |-- components/      # Workspace, trial, chat, and UI components
+|   |   |-- hooks/           # Session and UI hooks
+|   |   |-- api.js           # Authenticated API client
+|   |   `-- firebase.js      # Firebase web app initialization
+|   |-- .env.example
+|   `-- package.json
+|-- firebase.json
+|-- firestore.rules
+|-- ARCHITECTURE.md
+`-- README.md
 ```
 
 ## Testing
@@ -231,7 +237,13 @@ npm run build
 
 ## Deployment
 
-This repository does not include production hosting manifests. Configure frontend and API hosting, secrets, Google Cloud IAM, CORS, and monitoring for the chosen platform. Build the frontend with:
+The repository does not include production hosting manifests. Host the frontend on a static web host and FastAPI on an ASGI-compatible service. Configure HTTPS, production CORS origins, secrets, Google Cloud IAM, monitoring, and backups for the chosen platform. Deploy the Firestore rules with:
+
+```powershell
+firebase deploy --only firestore:rules
+```
+
+Build and serve the frontend from the chosen static host:
 
 ```powershell
 cd frontend
@@ -245,18 +257,19 @@ cd backend
 uvicorn app.main:app --host 0.0.0.0 --port <PORT>
 ```
 
-Do not expose this API publicly until application-level authentication is implemented and reviewed.
+## Security
 
-## Security Status and Planned Work
-
-- The API has no application-level authentication yet. User login via Firebase Authentication is planned for a later phase, before deployment.
-- Until then, run the app locally or only behind infrastructure-level access control. Do not expose it publicly or use it with real patient data.
-- The emergency warning list is a placeholder pending review and approval by a qualified clinician. Keyword rules can miss emergencies and can produce false positives; this first-release screen prefers a false positive over a missed warning and is not clinically validated.
-- No regulatory compliance, including HIPAA or GDPR compliance, is claimed.
-- The direct-identifier check detects only common patterns and is not comprehensive de-identification.
-- Request logs avoid case text, extracted facts, search queries, prompts, model responses, and medical tool data. Error logs pass through one sanitizer and contain a request ID, workflow step, and error category; completion logs include timing and status metadata. ADK and cloud SDK debug logs are suppressed.
-- ADK uses isolated in-memory sessions for individual model calls. Session content is deleted after each call; it is not written to a server-side session store or persistent chat memory.
-- Results remain advisory. A qualified clinical team must verify source trial records and eligibility.
+- Profile, session, matching, and chat routes require a verified Firebase ID token. Health and readiness routes remain public.
+- The backend derives the user UID from the token and scopes Firestore documents to that UID. It also checks that a chat session and selected trial IDs belong to that user/session.
+- Application role is fixed server-side to `clinical_technician`; client input cannot assign a different role.
+- Firestore rules deny direct browser reads and writes. Server-side Firebase Admin access uses ADC or the deployed service identity.
+- A submitted, identifier-screened search is saved to `users/{uid}/sessions/{sessionId}` with its query, server timestamps, title, matched trial IDs, complete structured result (including criteria assessment), and chat turns. This includes health-related data. The sidebar loads sessions newest-updated first; reopening a session restores its query, results, and chat. Deleting a session removes its saved data.
+- Search queries are saved only after the API's limited direct-identifier screening. That screening is not comprehensive de-identification; submit only appropriately de-identified cases.
+- Token verification skips the per-request revocation lookup to reduce latency. A revoked token may remain valid until normal token expiry.
+- The emergency warning list is a placeholder pending qualified clinician review. Phrase screening can miss emergencies and produce false positives.
+- Direct-identifier checks are limited and are not comprehensive de-identification. Use only de-identified cases.
+- No regulatory compliance, including HIPAA or GDPR compliance, is claimed. Results are advisory and require qualified clinical review against official trial records.
+- Request logs avoid patient narratives, extracted facts, search queries, prompts, and model responses.
 
 ## Contributing
 
