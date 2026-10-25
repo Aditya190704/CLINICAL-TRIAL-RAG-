@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+node_modules/
+src/
+public/
+package*.json
+vite.config.js
+index.html
