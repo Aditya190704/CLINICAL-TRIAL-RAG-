@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from "
 import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signOut,
   updateProfile,
@@ -64,6 +65,7 @@ export function AuthProvider({ children }) {
     error,
     configured: isFirebaseConfigured,
     signIn: (email, password) => signInWithEmailAndPassword(auth, email, password),
+    sendPasswordReset: (email) => sendPasswordResetEmail(auth, email),
     signUp: async (displayName, email, password) => {
       const credential = await createUserWithEmailAndPassword(auth, email, password);
       await updateProfile(credential.user, { displayName });

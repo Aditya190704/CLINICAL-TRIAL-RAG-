@@ -16,19 +16,31 @@ function readableAuthError(error) {
   return messages[code] || error?.message || "Authentication failed. Please try again.";
 }
 
+function readableResetError(error) {
+  const code = error?.code || "";
+  const messages = {
+    "auth/invalid-email": "Enter a valid email address to reset your password.",
+    "auth/too-many-requests": "Too many reset attempts. Wait a moment and try again.",
+    "auth/network-request-failed": "Network error. Check your connection and retry.",
+  };
+  return messages[code] || "We could not send the reset email. Please try again.";
+}
+
 export default function AuthScreen() {
-  const { signIn, signUp, configured, error: profileError, retryProfile } = useAuth();
+  const { signIn, signUp, sendPasswordReset, configured, error: profileError, retryProfile } = useAuth();
   const [mode, setMode] = useState("login");
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [resetMessage, setResetMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const isSignup = mode === "signup";
 
   const submit = async (event) => {
     event.preventDefault();
     setError("");
+    setResetMessage("");
     const cleanEmail = email.trim();
     if (isSignup && !displayName.trim()) return setError("Enter your name.");
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) return setError("Enter a valid email address.");
@@ -39,6 +51,26 @@ export default function AuthScreen() {
       else await signIn(cleanEmail, password);
     } catch (submitError) {
       setError(readableAuthError(submitError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    setError("");
+    setResetMessage("");
+    const cleanEmail = email.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setError("Enter your account email above, then choose Forgot password?");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      await sendPasswordReset(cleanEmail);
+      setResetMessage("If an account exists for this email, Firebase will send a password reset link shortly.");
+    } catch (resetError) {
+      setError(readableResetError(resetError));
     } finally {
       setBusy(false);
     }
@@ -89,7 +121,15 @@ export default function AuthScreen() {
               Password
               <input type="password" autoComplete={isSignup ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} minLength={6} required />
             </label>
+            {!isSignup && (
+              <div className="auth-forgot-row">
+                <button type="button" onClick={handleForgotPassword} disabled={busy}>
+                  Forgot password?
+                </button>
+              </div>
+            )}
             {(error || profileError) && <div className="auth-alert" role="alert">{error || profileError}</div>}
+            {resetMessage && <div className="auth-success" role="status">{resetMessage}</div>}
             {profileError && (
               <button className="auth-secondary-button" type="button" onClick={retryProfile}>Retry loading profile</button>
             )}
@@ -102,7 +142,7 @@ export default function AuthScreen() {
         {configured && !profileError && (
           <p className="auth-switch">
             {isSignup ? "Already have an account?" : "New clinical technician?"}{" "}
-            <button type="button" onClick={() => { setMode(isSignup ? "login" : "signup"); setError(""); }}>
+            <button type="button" onClick={() => { setMode(isSignup ? "login" : "signup"); setError(""); setResetMessage(""); }}>
               {isSignup ? "Sign in" : "Create account"}
             </button>
           </p>

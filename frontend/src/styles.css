@@ -1439,6 +1439,43 @@ button {
 
 .auth-form .auth-alert { margin-top: 0; }
 
+.auth-forgot-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -9px;
+}
+
+.auth-forgot-row button {
+  padding: 3px 0;
+  border: 0;
+  color: var(--primary);
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.auth-forgot-row button:hover,
+.auth-forgot-row button:focus-visible {
+  text-decoration: underline;
+}
+
+.auth-forgot-row button:disabled {
+  opacity: .65;
+  cursor: wait;
+}
+
+.auth-success {
+  padding: 10px 12px;
+  border: 1px solid #b7e4cf;
+  border-radius: var(--radius-sm);
+  color: #176b4b;
+  background: #effaf4;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .auth-switch {
   margin-top: 18px;
   color: var(--text-secondary);
