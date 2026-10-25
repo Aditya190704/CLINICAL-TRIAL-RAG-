@@ -288,16 +288,31 @@ async def _run_steps(case: str, request_id: str) -> MatchResponse:
     assessment_case = remove_conflicting_fact_mentions(case, excluded_values)
 
     try:
-        # Start with validated primary diagnoses. Less common modifiers remain
-        # available to a single refinement if the initial retrieval is weak.
-        query = " ".join(profile.primary_conditions) or profile.search_query
-        query = safe_search_query(query, case, profile)
-        for value in excluded_values:
-            query = re.sub(rf"(?<!\w){re.escape(value)}(?!\w)", " ", query, flags=re.I)
-        query = " ".join(query.split())
-        query = safe_search_query(query, case, profile)
+        # Search both the core diagnosis and the richer validated profile so
+        # subtype, stage, biomarkers, and treatment facts can improve ranking.
+        condition_query = " ".join(profile.primary_conditions) or profile.search_query
+        detailed_query = profile.search_query or condition_query
+        grounded_queries = []
+        for proposed_query in (condition_query, detailed_query):
+            safe_query = safe_search_query(proposed_query, case, profile)
+            for value in excluded_values:
+                safe_query = re.sub(
+                    rf"(?<!\w){re.escape(value)}(?!\w)",
+                    " ",
+                    safe_query,
+                    flags=re.I,
+                )
+            safe_query = " ".join(safe_query.split())
+            if safe_query:
+                grounded_queries.append(safe_search_query(safe_query, case, profile))
+        grounded_queries = list(dict.fromkeys(grounded_queries))
+        query = grounded_queries[-1] if grounded_queries else safe_search_query(
+            profile.search_query,
+            case,
+            profile,
+        )
         retrieval = ApprovedTrialRetrieval(case=case, profile=profile)
-        first_raw = await retrieval.search(query)
+        first_raw = await retrieval.search(grounded_queries or [query])
         index = _trial_index()
         candidates = _dedupe_candidates(first_raw, index)
     except Exception as exc:

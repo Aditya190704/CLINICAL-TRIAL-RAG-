@@ -28,14 +28,28 @@ class ApprovedTrialRetrieval:
         self._profile = profile
         self.calls = 0
 
-    async def search(self, query: str) -> list[Candidate]:
+    async def search(self, query: str | list[str]) -> list[Candidate]:
         if self.calls >= MAX_RETRIEVAL_CALLS:
             raise ValueError("The request retrieval limit has been reached.")
-        validated = RetrievalQuery(query=query)
-        safe_query = safe_search_query(validated.query, self._case, self._profile)
+
+        proposed_queries = [query] if isinstance(query, str) else query
+        if not isinstance(proposed_queries, list):
+            raise ValueError("Retrieval queries must be text values.")
+
+        safe_queries = list(dict.fromkeys(
+            safe_search_query(
+                RetrievalQuery(query=item).query,
+                self._case,
+                self._profile,
+            )
+            for item in proposed_queries
+        ))
+        if not safe_queries:
+            raise ValueError("At least one grounded retrieval query is required.")
+
         self.calls += 1
         return await asyncio.wait_for(
-            asyncio.to_thread(retrieve, [safe_query]),
+            asyncio.to_thread(retrieve, safe_queries),
             timeout=min(60.0, settings.adk_timeout_seconds),
         )
 
