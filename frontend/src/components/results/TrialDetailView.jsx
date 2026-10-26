@@ -164,7 +164,7 @@ export default function TrialDetailView({
           </div>
           <p className="verdict-summary-text">
             {verdict === "ELIGIBLE"
-              ? "All assessed criteria support this patient case with no blocking exclusions found."
+              ? "No blockers were identified among the criteria assessed. A qualified clinical team must confirm eligibility."
               : verdict === "EXCLUDED"
               ? "At least one evaluated criterion blocks this patient based on documented evidence."
               : verdict === "COULD_NOT_ASSESS"
@@ -282,4 +282,3 @@ export default function TrialDetailView({
     </article>
   );
 }
-

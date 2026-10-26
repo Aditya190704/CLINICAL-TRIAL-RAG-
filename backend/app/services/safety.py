@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 from app.schemas import PatientProfile
-from app.services.patient_parser import _validate_profile
+from app.services.patient_parser import _explicit_search_facts, _validate_profile
 from app.services.untrusted_text import remove_instruction_like_clauses
 
 EMERGENCY_NOTICE = (
@@ -87,6 +87,14 @@ def detect_supported_conflicts(case: str) -> tuple[list[str], list[str]]:
         conflicts.append("Conflicting disease stages are stated in the case.")
         excluded.extend(stage_values)
 
+    clinical_t_stages = list(dict.fromkeys(
+        item.group(0).upper()
+        for item in re.finditer(r"\bcT[0-4](?:[a-c])?\b", case, re.I)
+    ))
+    if len(clinical_t_stages) > 1:
+        conflicts.append("Conflicting clinical T stages are stated in the case.")
+        excluded.extend(clinical_t_stages)
+
     return conflicts, excluded
 
 
@@ -95,7 +103,9 @@ def remove_conflicting_fact_mentions(case: str, excluded_values: list[str]) -> s
     safe_case = case
     for value in excluded_values:
         escaped = re.escape(str(value))
-        if value.isdigit():
+        if re.fullmatch(r"cT[0-4](?:[a-c])?", value, re.I):
+            pattern = rf"\b{escaped}\b"
+        elif value.isdigit():
             pattern = rf"\b(?:(?:age|aged)\s*)?{escaped}(?:\s*years?\s*old|-year-old|\s*yo)?\b"
         else:
             pattern = rf"\b(?:stage\s*|stg\.?\s*){escaped}[A-D]?\b"
@@ -112,17 +122,16 @@ def validate_extracted_profile(profile: PatientProfile, case: str) -> PatientPro
     stage_values = {
         value.casefold()
         for value in excluded
-        if re.fullmatch(r"(?:IV|III|II|I|4|3|2|1|0)[A-D]?", value, re.I)
+        if re.fullmatch(r"(?:IV|III|II|I|4|3|2|1|0)[A-D]?|cT[0-4](?:[a-c])?", value, re.I)
     }
     if stage_values:
         def remove_conflicting_stage(fact: str) -> str:
             for value in stage_values:
-                fact = re.sub(
-                    rf"\b(?:stage\s*|stg\.?\s*){re.escape(value)}\b",
-                    " ",
-                    fact,
-                    flags=re.I,
-                )
+                if re.fullmatch(r"cT[0-4](?:[a-c])?", value, re.I):
+                    pattern = rf"\b{re.escape(value)}\b"
+                else:
+                    pattern = rf"\b(?:stage\s*|stg\.?\s*){re.escape(value)}\b"
+                fact = re.sub(pattern, " ", fact, flags=re.I)
             return " ".join(fact.split()).strip(" ,;:-")
 
         for field_name in ("primary_conditions", "key_findings"):
@@ -140,10 +149,22 @@ def validate_extracted_profile(profile: PatientProfile, case: str) -> PatientPro
                 if fact
                 and re.sub(r"[^a-z0-9]+", " ", fact.casefold()).strip() in case_normalized
             ]
-            existing = getattr(validated, field_name)
+            existing = [
+                remove_conflicting_stage(fact)
+                for fact in getattr(validated, field_name)
+            ]
+            existing = [fact for fact in existing if fact]
             setattr(validated, field_name, list(dict.fromkeys([*existing, *supported_facts])))
     if any(conflict.startswith("Conflicting ages") for conflict in conflicts):
         validated.age_years = None
+
+    safe_case = remove_instruction_like_clauses(
+        remove_conflicting_fact_mentions(case, excluded)
+    )
+    validated.key_findings = list(dict.fromkeys([
+        *validated.key_findings,
+        *_explicit_search_facts(safe_case),
+    ]))
 
     query_facts = list(dict.fromkeys([
         *validated.primary_conditions,
@@ -188,4 +209,3 @@ def safe_search_query(query: str, case: str, profile: PatientProfile) -> str:
     if fallback:
         return fallback[:2000]
     raise ValueError("Search query contains unsupported facts.")
-

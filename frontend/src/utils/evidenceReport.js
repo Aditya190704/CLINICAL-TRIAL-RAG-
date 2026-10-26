@@ -1,4 +1,6 @@
 /** Build and download a self-contained, print-ready evidence review report. */
+import { criterionImpactLabel } from "./criterionImpact.js";
+
 const escapeHtml = (value) => String(value ?? "")
   .replaceAll("&", "&amp;")
   .replaceAll("<", "&lt;")
@@ -7,11 +9,6 @@ const escapeHtml = (value) => String(value ?? "")
   .replaceAll("'", "&#39;");
 
 const list = (items) => (Array.isArray(items) ? items : []);
-const impactLabel = (impact) => ({
-  SUPPORTS: "Supported",
-  BLOCKS: "Potential blocker",
-  UNKNOWN: "Could not assess",
-}[impact] || "Could not assess");
 
 function renderList(items, emptyText) {
   const values = list(items).filter(Boolean);
@@ -25,7 +22,7 @@ function renderTrial(trial, index) {
   const criterionRows = criteria.length
     ? criteria.map((criterion) => `
       <article class="criterion">
-        <div class="criterion-heading"><strong>${escapeHtml(criterion.criterion_type || "Criterion")}</strong><span class="impact impact-${escapeHtml(criterion.impact || "UNKNOWN")}">${escapeHtml(impactLabel(criterion.impact))}</span></div>
+        <div class="criterion-heading"><strong>${escapeHtml(criterion.criterion_type || "Criterion")}</strong><span class="impact impact-${escapeHtml(criterion.impact || "UNKNOWN")}">${escapeHtml(criterionImpactLabel(criterion.impact, criterion.criterion_type))}</span></div>
         <p class="label">Trial source text</p><blockquote>${escapeHtml(criterion.criterion_quote || "No verified trial quote available.")}</blockquote>
         <p class="label">Patient evidence</p><blockquote>${escapeHtml(criterion.patient_evidence || "No verified patient evidence was returned. Review the original case and trial criterion.")}</blockquote>
         ${criterion.explanation ? `<p class="explanation">${escapeHtml(criterion.explanation)}</p>` : ""}

@@ -4,8 +4,8 @@ import { deduplicateCriteria } from "../../utils/deduplication";
 
 const FILTERS = [
   { id: "ALL", label: "All criteria" },
-  { id: "SUPPORTS", label: "Met" },
-  { id: "BLOCKS", label: "Not met" },
+  { id: "SUPPORTS", label: "Supports trial" },
+  { id: "BLOCKS", label: "Potential blocker" },
   { id: "UNKNOWN", label: "Could not assess" },
 ];
 
@@ -61,7 +61,7 @@ export default function CriteriaSection({ criteria = [] }) {
                   </td>
                   <td data-label="Patient evidence">{evidence ? <blockquote className="criterion-patient-evidence">“{evidence}”</blockquote> : <span className="criterion-missing-evidence">Not provided in the case</span>}</td>
                   <td data-label="Assessment"><span className="criterion-assessment-text">{item.explanation || "No assessment explanation was returned."}</span></td>
-                  <td data-label="Status"><Badge impact={item.impact} size="sm" /></td>
+                  <td data-label="Status"><Badge impact={item.impact} criterionType={item.criterion_type} size="sm" /></td>
                 </tr>
               );
             })}</tbody>

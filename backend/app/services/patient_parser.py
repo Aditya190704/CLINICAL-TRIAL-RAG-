@@ -19,6 +19,22 @@ def _fact_is_supported(fact: str, case_normalized: str) -> bool:
     return bool(normalized_fact) and normalized_fact in case_normalized
 
 
+def _explicit_search_facts(patient_case: str) -> list[str]:
+    """Keep distinctive clinical phrases exactly as stated in the case."""
+    safe_case = remove_instruction_like_clauses(patient_case)
+    patterns = (
+        r"\bnipple[- ]sparing mastectomy\b",
+        r"\bclinically node[- ]negative\b",
+        r"\bcT[0-4](?:[a-c])?\b",
+        r"\bECOG(?:\s+performance\s+status)?\s+(?:is\s+)?[0-5]\b",
+    )
+    return list(dict.fromkeys(
+        match.group(0)
+        for pattern in patterns
+        for match in re.finditer(pattern, safe_case, re.I)
+    ))
+
+
 def _validate_profile(profile: PatientProfile, patient_case: str) -> PatientProfile:
     """Discard extracted facts and query terms not supported by the case."""
     case_normalized = _normalized_text(patient_case)
@@ -43,9 +59,13 @@ def _validate_profile(profile: PatientProfile, patient_case: str) -> PatientProf
     ):
         profile.age_years = None
 
+    sex_terms = {
+        value.casefold()
+        for value in re.findall(r"\b(?:male|female|man|woman)\b", patient_case, re.I)
+    }
     stated_sexes = {
-        value.upper()
-        for value in re.findall(r"\b(?:male|female)\b", patient_case, re.I)
+        "FEMALE" if value == "woman" else "MALE" if value == "man" else value.upper()
+        for value in sex_terms
     }
     if profile.sex not in stated_sexes or len(stated_sexes) != 1:
         profile.sex = "UNKNOWN"

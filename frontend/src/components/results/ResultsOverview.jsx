@@ -16,7 +16,7 @@ export default function ResultsOverview({
 
   const matches = data.matches;
   const total = matches.length;
-  const eligible = matches.filter(
+  const reviewRequired = matches.filter(
     (m) => m.verdict === "ELIGIBLE" || m.verdict === "LIKELY ELIGIBLE"
   ).length;
   const possible = matches.filter(
@@ -52,8 +52,8 @@ export default function ResultsOverview({
         <div className="stat-divider" />
 
         <div className="stat-item">
-          <span className="stat-label">Likely Eligible</span>
-          <span className="stat-value text-success">{eligible}</span>
+          <span className="stat-label">Requires Clinical Review</span>
+          <span className="stat-value">{reviewRequired}</span>
         </div>
 
         <div className="stat-divider" />
@@ -102,4 +102,3 @@ export default function ResultsOverview({
     </div>
   );
 }
-

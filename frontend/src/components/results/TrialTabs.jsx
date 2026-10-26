@@ -7,7 +7,7 @@ export default function TrialTabs({ matches = [], activeTab = 0, onSelectTab }) 
   if (!Array.isArray(matches) || matches.length === 0) return null;
 
   return (
-    <div className="trial-tabs-container" role="group" aria-label="Top three candidate trials">
+    <div className="trial-tabs-container" role="group" aria-label="Candidate trials">
       {matches.slice(0, 3).map((trial, index) => {
         const isActive = index === activeTab;
         const rank = trial.rank ?? index + 1;

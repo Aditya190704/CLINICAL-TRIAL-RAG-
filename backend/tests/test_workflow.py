@@ -108,10 +108,10 @@ def test_assessment_cap_and_result_cap_are_enforced(monkeypatch):
     assert len(response.matches) == 1
 
 
-def test_assessment_hard_cap_and_three_result_limit(monkeypatch):
+def test_assessment_and_result_caps_follow_configuration(monkeypatch):
     ids = [f"NCT000000{i:02d}" for i in range(1, 13)]
-    monkeypatch.setattr("app.agents.workflow.settings.candidates_to_judge", 100)
-    monkeypatch.setattr("app.agents.workflow.settings.final_results", 20)
+    monkeypatch.setattr("app.agents.workflow.settings.candidates_to_judge", 10)
+    monkeypatch.setattr("app.agents.workflow.settings.final_results", 8)
     with (
         patch("app.agents.workflow.extract_patient", new_callable=AsyncMock, return_value=extracted()),
         patch("app.agents.workflow.ApprovedTrialRetrieval.search", new_callable=AsyncMock, return_value=[candidate(item, .8) for item in ids]),
@@ -121,7 +121,7 @@ def test_assessment_hard_cap_and_three_result_limit(monkeypatch):
     ):
         response = asyncio.run(run_workflow_async(CASE))
     assert assess.await_count == 10
-    assert len(response.matches) == 3
+    assert len(response.matches) == 8
 
 
 def test_sync_adapter_refuses_to_nest_inside_running_event_loop():
@@ -131,19 +131,87 @@ def test_sync_adapter_refuses_to_nest_inside_running_event_loop():
     asyncio.run(call())
 
 
-def test_no_candidates_stops_without_refinement_or_assessment():
+def test_no_candidates_attempts_bounded_refinement_before_returning_empty():
     with (
         patch("app.agents.workflow.extract_patient", new_callable=AsyncMock, return_value=extracted()),
         patch("app.agents.workflow.ApprovedTrialRetrieval.search", new_callable=AsyncMock, return_value=[]),
-        patch("app.agents.workflow.propose_refinement", new_callable=AsyncMock, return_value=RefinementOutput()),
+        patch("app.agents.workflow.propose_refinement", new_callable=AsyncMock, return_value=RefinementOutput()) as refinement,
         patch("app.agents.workflow.assess_trial", new_callable=AsyncMock) as assess,
         patch("app.agents.workflow.trials", return_value={}),
+        patch("app.agents.workflow.chunks", return_value={}),
     ):
         response = asyncio.run(run_workflow_async(CASE))
     assert response.matches == []
     assert response.result_message and "in this search" in response.result_message
     assert response.missing_key_facts
+    refinement.assert_awaited_once()
     assess.assert_not_awaited()
+
+
+def test_empty_initial_retrieval_refines_and_returns_validated_candidate():
+    case = (
+        "A 45-year-old woman has clinically node-negative, cT2 breast cancer "
+        "and is considered a candidate for nipple-sparing mastectomy. Her ECOG "
+        "performance status is 0."
+    )
+    profile = PatientProfile(
+        age_years=45,
+        sex="FEMALE",
+        primary_conditions=["breast cancer"],
+        search_query="breast cancer",
+    )
+    nct_id = "NCT05245812"
+    trial_record = {
+        "nct_id": nct_id,
+        "title": "Safety and Feasibility of Robotic SP Nipple Sparing Mastectomy",
+        "eligibility_text": (
+            "Candidates for nipple-sparing mastectomy. Clinically node-negative "
+            "cT1-T3 breast cancer. ECOG performance status 0 or 1."
+        ),
+    }
+    assessment = JudgeOutput(criteria=[{
+        "criterion_type": "INCLUSION",
+        "criterion_quote": "Clinically node-negative cT1-T3 breast cancer.",
+        "patient_evidence_quote": "clinically node-negative, cT2 breast cancer",
+        "impact": "SUPPORTS",
+        "explanation": "The stated clinical stage is within the quoted range.",
+    }])
+    with (
+        patch("app.agents.workflow.extract_patient", new_callable=AsyncMock, return_value=PatientExtractionOutput(profile=profile)),
+        patch(
+            "app.agents.workflow.ApprovedTrialRetrieval.search",
+            new_callable=AsyncMock,
+            side_effect=[[], [candidate(nct_id, .72)]],
+        ) as retrieval,
+        patch(
+            "app.agents.workflow.propose_refinement",
+            new_callable=AsyncMock,
+            return_value=RefinementOutput(
+                refine=True,
+                search_query="breast cancer cT2 nipple-sparing mastectomy",
+            ),
+        ) as refinement,
+        patch("app.agents.workflow.assess_trial", new_callable=AsyncMock, return_value=assessment),
+        patch("app.agents.workflow.trials", return_value={nct_id: trial_record}),
+        patch("app.agents.workflow.chunks", return_value={}),
+    ):
+        response = asyncio.run(run_workflow_async(case))
+
+    assert retrieval.await_count == 2
+    assert refinement.await_count == 1
+    initial_queries = retrieval.await_args_list[0].args[0]
+    assert len(initial_queries) == 2
+    assert initial_queries[0] != initial_queries[1]
+    assert "breast cancer" in initial_queries[0].casefold()
+    assert all(
+        term in initial_queries[1].casefold()
+        for term in ("nipple-sparing mastectomy", "clinically node-negative", "ct2", "ecog performance status is 0")
+    )
+    assert [match.nct_id for match in response.matches] == [nct_id]
+    assert response.matches[0].verdict == "POSSIBLY_ELIGIBLE"
+    for fact in ("nipple-sparing mastectomy", "clinically node-negative", "cT2", "ECOG performance status is 0"):
+        assert fact.casefold() in response.patient_profile.search_query.casefold()
+    assert response.patient_profile.sex == "FEMALE"
 
 
 def test_weak_retrieval_refines_once_and_merges_candidates():
@@ -388,4 +456,3 @@ def test_adk_session_is_created_and_deleted_around_validated_output():
         client.aio.aclose.assert_awaited_once()
         client.close.assert_called_once()
     asyncio.run(run())
-

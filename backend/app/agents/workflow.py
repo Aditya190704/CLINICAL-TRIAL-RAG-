@@ -34,9 +34,11 @@ DISCLAIMER = (
     "A qualified clinical team must review the official criteria and confirm any decision."
 )
 
-HARD_MAX_ASSESSMENTS = 10
-MAX_ASSESSMENTS = min(HARD_MAX_ASSESSMENTS, settings.candidates_to_judge)
-MAX_SHORTLIST_RESULTS = 3
+HARD_MAX_ASSESSMENTS = 20
+MAX_ASSESSMENTS = min(
+    HARD_MAX_ASSESSMENTS,
+    max(1, settings.candidates_to_judge),
+)
 REFINEMENT_MIN_SIMILARITY = 0.35
 MAX_WORKFLOW_SECONDS = min(
     300.0,
@@ -215,10 +217,30 @@ def _unresolved_count(criteria: list[CriterionResult]) -> int:
     return sum(item.impact == "UNKNOWN" for item in criteria)
 
 
-def _refinement_query_is_useful(query: str, initial_query: str) -> bool:
-    initial_terms = set(re.findall(r"[a-z0-9]+", initial_query.casefold()))
+def _refinement_query_is_useful(query: str, initial_queries: list[str]) -> bool:
     refined_terms = set(re.findall(r"[a-z0-9]+", query.casefold()))
-    return bool(refined_terms - initial_terms)
+    if not refined_terms:
+        return False
+
+    initial_term_sets = [
+        set(re.findall(r"[a-z0-9]+", initial.casefold()))
+        for initial in initial_queries
+    ]
+    normalized_query = " ".join(re.findall(r"[a-z0-9]+", query.casefold()))
+    if any(
+        normalized_query == " ".join(re.findall(r"[a-z0-9]+", initial.casefold()))
+        for initial in initial_queries
+    ):
+        return False
+
+    # A refinement may add new supported terms or combine distinct initial
+    # searches into a genuinely different condition-plus-detail query.
+    if any(refined_terms - terms for terms in initial_term_sets):
+        return True
+    return (
+        sum(bool(refined_terms & terms) for terms in initial_term_sets) > 1
+        and not any(refined_terms <= terms for terms in initial_term_sets)
+    )
 
 
 def _refinement_query_is_profile_grounded(query: str, profile: PatientProfile) -> bool:
@@ -288,10 +310,15 @@ async def _run_steps(case: str, request_id: str) -> MatchResponse:
     assessment_case = remove_conflicting_fact_mentions(case, excluded_values)
 
     try:
-        # Search both the core diagnosis and the richer validated profile so
-        # subtype, stage, biomarkers, and treatment facts can improve ranking.
+        # Embed distinct diagnosis and detail queries together so retrieval
+        # can find candidates by either the condition or specific clinical facts.
         condition_query = " ".join(profile.primary_conditions) or profile.search_query
-        detailed_query = profile.search_query or condition_query
+        detail_facts = list(dict.fromkeys([
+            *profile.key_findings,
+            *profile.prior_treatments,
+            *profile.current_medications,
+        ]))
+        detailed_query = " ".join(detail_facts) or profile.search_query or condition_query
         grounded_queries = []
         for proposed_query in (condition_query, detailed_query):
             safe_query = safe_search_query(proposed_query, case, profile)
@@ -328,17 +355,6 @@ async def _run_steps(case: str, request_id: str) -> MatchResponse:
         ) from exc
 
     retrieval_calls = retrieval.calls
-    if not candidates:
-        logger.info("request_id=%s step=matching_complete candidates=0 retrieval_calls=%d", request_id, retrieval_calls)
-        return MatchResponse(
-            patient_profile=profile,
-            matches=[],
-            disclaimer=DISCLAIMER,
-            missing_key_facts=missing,
-            conflicting_facts=conflicts,
-            result_message="No suitable trial was found in this search. This does not mean that no suitable trial exists.",
-        )
-
     try:
         # Criteria checks are independent model calls. Bound their concurrency
         # to avoid serial latency while respecting the configured provider cap.
@@ -418,7 +434,7 @@ async def _run_steps(case: str, request_id: str) -> MatchResponse:
                     if (
                         refined_query
                         and _refinement_query_is_profile_grounded(refined_query, profile)
-                        and _refinement_query_is_useful(refined_query, query)
+                        and _refinement_query_is_useful(refined_query, grounded_queries or [query])
                     ):
                         second_raw = await retrieval.search(refined_query)
                         candidates = _merge_candidates(candidates, second_raw, index)
@@ -482,7 +498,7 @@ async def _run_steps(case: str, request_id: str) -> MatchResponse:
         candidate
         for candidate in ranked
         if assessments[_candidate_id(candidate)]["verdict"] != "EXCLUDED"
-    ][:min(MAX_SHORTLIST_RESULTS, max(0, int(settings.final_results)))]
+    ][:max(0, int(settings.final_results))]
     chunk_lookup = _chunk_index()
     matches = [
         _build_match(

@@ -60,7 +60,7 @@ RAG means the model is given retrieved trial material to work from. The model is
 
 - Sign up or sign in using Firebase Authentication.
 - Submit a de-identified patient case for matching.
-- View a shortlist of up to three non-excluded trial candidates and separately listed trials with verified blocking criteria.
+- View up to the configured maximum of non-excluded trial candidates and separately listed trials with verified blocking criteria.
 - Review trial status, phase, condition, match relevance, criteria, retrieved passages, and source links.
 - Open a dedicated clinical assessment summary and filter criteria by status.
 - See missing or conflicting facts that may need clarification.

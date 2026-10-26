@@ -16,7 +16,7 @@ export default function SessionItem({
 
   const matches = data?.matches || [];
   const matchCount = matches.length;
-  const eligibleCount = matches.filter(
+  const reviewRequiredCount = matches.filter(
     (m) => m.verdict === "ELIGIBLE" || m.verdict === "LIKELY ELIGIBLE"
   ).length;
 
@@ -76,7 +76,7 @@ export default function SessionItem({
         {matchCount > 0 ? (
           <span className="session-badge session-badge-matched">
             {matchCount} {matchCount === 1 ? "trial" : "trials"}
-            {eligibleCount > 0 && ` • ${eligibleCount} eligible`}
+            {reviewRequiredCount > 0 && ` • ${reviewRequiredCount} need review`}
           </span>
         ) : patientCase ? (
           <span className="session-badge session-badge-draft">Ready to match</span>
@@ -87,4 +87,3 @@ export default function SessionItem({
     </div>
   );
 }
-

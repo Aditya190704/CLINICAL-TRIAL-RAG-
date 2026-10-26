@@ -1,3 +1,5 @@
+import pytest
+
 from app.schemas import CriterionResult, JudgeOutput, JudgedCriterion, PatientProfile
 from app.services.eligibility_judge import compute_verdict, verify_judge_output
 from app.services.patient_parser import _validate_profile
@@ -43,6 +45,49 @@ def test_patient_profile_keeps_explicit_age_and_sex():
     assert validated.sex == "FEMALE"
 
 
+def test_explicit_procedure_node_status_stage_and_ecog_survive_validation():
+    case = (
+        "A 45-year-old woman has clinically node-negative, cT2 breast cancer "
+        "and is considered a candidate for nipple-sparing mastectomy. Her ECOG "
+        "performance status is 0, she can provide informed consent, and she "
+        "has no inflammatory breast cancer, skin involvement, nipple-areolar "
+        "complex involvement, or contraindication to general anesthesia."
+    )
+    profile = PatientProfile(
+        age_years=45,
+        sex="FEMALE",
+        primary_conditions=["breast cancer"],
+        search_query="breast cancer",
+    )
+
+    validated = validate_extracted_profile(profile, case)
+
+    for fact in (
+        "nipple-sparing mastectomy",
+        "clinically node-negative",
+        "cT2",
+        "ECOG performance status is 0",
+    ):
+        assert fact in validated.key_findings
+        assert fact.casefold() in validated.search_query.casefold()
+
+
+def test_conflicting_clinical_t_stages_are_removed_from_search_profile():
+    case = "Patient with cT2 and cT3 breast cancer."
+    profile = PatientProfile(
+        primary_conditions=["breast cancer"],
+        key_findings=["cT2"],
+        search_query="breast cancer cT2",
+    )
+
+    validated = validate_extracted_profile(profile, case)
+
+    conflicts, _ = detect_supported_conflicts(case)
+    assert any("clinical T stages" in item for item in conflicts)
+    assert "ct2" not in validated.search_query.casefold()
+    assert "ct3" not in validated.search_query.casefold()
+
+
 def test_non_blocking_assessment_never_reports_eligible():
     supported = CriterionResult(
         source="TRIAL_TEXT",
@@ -80,6 +125,66 @@ def test_unparseable_judge_output_fails_closed_without_logging_response(caplog):
     assert any(item.impact == "UNKNOWN" for item in criteria)
     assert "Manual review is required." in summary
     assert private_response not in caplog.text
+
+
+def test_missing_distant_metastatic_status_stays_unknown_for_node_negative_case():
+    case = "Patient has clinically node-negative cT2 breast cancer."
+    output = JudgeOutput(criteria=[JudgedCriterion(
+        criterion_type="EXCLUSION",
+        criterion_quote="Distant metastatic disease",
+        patient_evidence_quote="clinically node-negative",
+        impact="SUPPORTS",
+        explanation="Node-negative means there is no distant disease.",
+    )])
+
+    criteria, _, _ = verify_judge_output(
+        case,
+        PatientProfile(key_findings=["clinically node-negative"], search_query="breast cancer"),
+        {"nct_id": "NCT00000001", "eligibility_text": "Distant metastatic disease"},
+        output,
+    )
+
+    assert len(criteria) == 1
+    assert criteria[0].impact == "UNKNOWN"
+    assert criteria[0].patient_evidence is None
+    assert compute_verdict(criteria) == "COULD_NOT_ASSESS"
+
+
+@pytest.mark.parametrize(
+    ("criterion_type", "case", "impact", "expected_verdict"),
+    [
+        ("INCLUSION", "Patient has stage cT2 breast cancer.", "SUPPORTS", "POSSIBLY_ELIGIBLE"),
+        ("INCLUSION", "Patient has stage cT2 breast cancer.", "BLOCKS", "EXCLUDED"),
+        ("EXCLUSION", "Patient has metastatic breast cancer.", "BLOCKS", "EXCLUDED"),
+        ("EXCLUSION", "Patient has no metastatic breast cancer.", "SUPPORTS", "POSSIBLY_ELIGIBLE"),
+    ],
+)
+def test_explicit_inclusion_and_exclusion_evidence_has_correct_impact(
+    criterion_type, case, impact, expected_verdict
+):
+    quote = (
+        "Stage cT2 breast cancer"
+        if criterion_type == "INCLUSION"
+        else "Metastatic breast cancer"
+    )
+    evidence = case.removeprefix("Patient has ").removesuffix(".")
+    output = JudgeOutput(criteria=[JudgedCriterion(
+        criterion_type=criterion_type,
+        criterion_quote=quote,
+        patient_evidence_quote=evidence,
+        impact=impact,
+        explanation="Assessment follows the explicit evidence.",
+    )])
+
+    criteria, _, _ = verify_judge_output(
+        case,
+        PatientProfile(primary_conditions=["breast cancer"], search_query="breast cancer"),
+        {"nct_id": "NCT00000001", "eligibility_text": quote},
+        output,
+    )
+
+    assert criteria[0].impact == impact
+    assert compute_verdict(criteria) == expected_verdict
 
 
 def test_urgent_screen_stops_on_positive_sign_but_respects_negation():

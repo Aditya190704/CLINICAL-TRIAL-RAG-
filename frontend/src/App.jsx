@@ -541,7 +541,7 @@ function ClinicalWorkspace({ authUser, onLogout }) {
                   <span className="section-eyebrow">TRIAL SHORTLIST</span>
                   <h3 className="shortlist-title">Candidate Clinical Trials</h3>
                   <p className="shortlist-subtitle">
-                    Top three non-excluded candidates. Select a trial to review its criterion evidence and citations.
+                    Available non-excluded candidates. Select a trial to review its criterion evidence and citations.
                   </p>
                 </div>
               </div>
