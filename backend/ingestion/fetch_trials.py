@@ -6,7 +6,7 @@ from collections import Counter # count trials by phase, sex, etc
 
 import requests # send HTTP request to clinicaltrials.gov API
 from app.config import settings # read configuration settings for directories and API parameters
-
+# https://clinicaltrials.gov/api/v2/studies/NCT04932928 - json example of a single trial response from the API v2
 API = "https://clinicaltrials.gov/api/v2/studies"
 AREAS = ["breast cancer", "lung cancer", "colorectal cancer", "type 2 diabetes", "heart failure",
          "chronic kidney disease", "rheumatoid arthritis", "multiple sclerosis", "asthma COPD",
@@ -21,13 +21,13 @@ def parse_age(s: str | None): # ClinicalTrials.gov can return age values in diff
     if not m: # input doesnt match return None
         return None
     v, unit = float(m.group(1)), m.group(2)
-    return v / {"year": 1, "month": 12, "week": 52, "day": 365}[unit]
+    return v / {"year": 1, "month": 12, "week": 52, "day": 365}[unit] #year unchanged, month divide by 12, week divide by 52, day divide by 365 to convert to years
 
 
 def flatten(study: dict) -> dict | None: # Takes one raw clinical trial response from the API and converts it into a clean Python dictionary.
 
     p = study.get("protocolSection", {}) # Gets the protocolSection from the API response, which contains the main clinical trial information.
-
+    
     ident, st, desc = (
         p.get("identificationModule", {}),
         p.get("statusModule", {}),
@@ -52,6 +52,7 @@ def flatten(study: dict) -> dict | None: # Takes one raw clinical trial response
         return None  # Skips this trial if either required piece of information is missing.
 
     return { # Returns a cleaned dictionary containing the useful information for our project.
+        # 21 fields are extracted from the API response and stored in a structured format.
 
         "nct_id": ident["nctId"],
         # Stores the unique ClinicalTrials.gov identifier of the trial.
@@ -180,12 +181,12 @@ def fetch_area(area: str, want: int, seen: set) -> list[dict]: # Fetches clinica
             # Stops if the API has no more pages.
 
         time.sleep(0.3)
-        # Waits briefly before requesting another page.
+        # Waits briefly before requesting another page to avoid 429 http error from PUBLIC API - too many requests in a short time.
 
     return out
     # Returns the collected valid and unique trial records.
 
-
+#prints summary of the downloaded trials, including counts of phases, sex distribution, and eligibility text length.
 def profile_data(trials: list[dict]):
     print(f"\nTrials: {len(trials)}")
     print("Phases:", Counter(p for t in trials for p in (t["phases"] or ["NA"])).most_common())
