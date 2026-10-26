@@ -213,7 +213,7 @@ def verify_judge_output(
         quote = (item.criterion_quote or "").strip()
         patient_evidence = (
             item.patient_evidence_quote or ""
-        ).strip()
+        ).strip() 
 
         # Never accept a criterion quotation that cannot be found in the
         # supplied trial eligibility text.

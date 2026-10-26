@@ -1,0 +1,108 @@
+flowchart LR
+  subgraph F["1. Frontend / User Interface"]
+    Tech["Clinical technician"]
+    React["React app<br/>AuthProvider + workspace"]
+    SessionUI["Session sidebar<br/>case input + results"]
+    ChatUI["ChatDrawer<br/>question + citations"]
+    Tech --> React
+    React --> SessionUI
+    SessionUI --> ChatUI
+  end
+
+  subgraph A["2. Authentication and Session Management"]
+    FirebaseAuth["Firebase Authentication<br/>ID token"]
+    Bearer["FastAPI bearer dependency<br/>Firebase Admin verification"]
+    Profile["Firestore profile<br/>users/{uid}"]
+    Sessions["Firestore sessions<br/>users/{uid}/sessions/{id}"]
+    Messages["Firestore messages<br/>chat turns"]
+    FirebaseAuth -->|"sign in / sign up"| React
+    React -->|"ID token"| Bearer
+    Bearer -->|"verified UID"| Profile
+    Bearer -->|"UID-scoped access"| Sessions
+    Sessions --> Messages
+  end
+
+  subgraph B["3. FastAPI Backend / API Layer"]
+    ProfileAPI["/api/auth/profile"]
+    SessionAPI["/api/sessions*"]
+    MatchAPI["POST /api/match"]
+    ChatAPI["POST /api/trials/chat"]
+    MatchAPI -->|"auth + request validation"| Bearer
+    ChatAPI -->|"auth + request validation"| Bearer
+    ProfileAPI -->|"auth required"| Bearer
+    SessionAPI -->|"auth required"| Bearer
+  end
+
+  React -->|"GET / POST profile"| ProfileAPI
+  SessionUI -->|"list / create / load / edit"| SessionAPI
+  SessionAPI --> Sessions
+
+  subgraph M["4. Matching Workflow"]
+    Validate["Validate bounds + direct-ID patterns"]
+    SaveQuery["Save query; status=searching"]
+    Urgent{"Urgent warning phrase?"}
+    Extract["ADK/Gemini task<br/>extract_patient"]
+    CheckProfile["Validate profile;<br/>derive missing/conflicting facts"]
+    MakeQueries["Build grounded condition<br/>and detail queries"]
+    CandidateFilter["Filter and dedupe NCT candidates"]
+    Assess["Application fan-out<br/>asyncio.gather + semaphore"]
+    Refine["Optional ADK/Gemini task<br/>propose_refinement"]
+    BuildResult["Build MatchResponse<br/>metadata + passages"]
+    MatchAPI --> Validate -->|"owned session or create one"| SaveQuery --> Urgent
+    Urgent -->|"No"| Extract --> CheckProfile --> MakeQueries
+    Urgent -.->|"Yes: emergency response;<br/>skip search and assessment"| BuildResult
+    MakeQueries --> Retrieve
+    Retrieve --> CandidateFilter --> Assess --> AssessTask --> Verify --> Judge --> Rank --> BuildResult
+    CandidateFilter -.->|"No candidates or best similarity below 0.35"| Refine
+    Refine -.->|"grounded proposal; at most one retry"| Retrieve
+    Refine -.->|"optional failure; keep initial assessment"| Verify
+    Refine -.->|"still empty / no accepted refinement"| Rank
+  end
+
+  subgraph R["5. Retrieval and Vector Search"]
+    Retrieve["Approved retrieval<br/>up to two calls"]
+    Embed["Vertex AI embeddings<br/>text-embedding-005 default"]
+    BQVector["BigQuery VECTOR_SEARCH<br/>trial_chunks.embedding<br/>COSINE"]
+    RRF["Application RRF + similarity<br/>chunk aggregation"]
+    TrialData["Trial metadata + chunks<br/>GCS if configured; local JSON fallback<br/>(cached)"]
+    ChatQuery["Chat question + selected NCT IDs"]
+    ChatBQ["BigQuery selected-trial SQL<br/>Python cosine scoring"]
+    ChatEvidence["Select / limit evidence<br/>local lexical fallback if needed"]
+    Retrieve --> Embed --> BQVector --> RRF --> CandidateFilter
+    TrialData -->|"metadata / eligibility text"| CandidateFilter
+    TrialData -->|"chunk IDs to response passages"| BuildResult
+    ChatQuery -->|"question embedding"| Embed
+    Embed --> ChatBQ
+    ChatQuery -->|"selected NCT IDs"| ChatBQ
+    ChatBQ --> ChatEvidence
+    ChatBQ -.->|"no rows or retrieval error"| TrialData
+    TrialData -.->|"lexical-ranked local evidence"| ChatEvidence
+  end
+
+  subgraph E["6. Model Tasks and Evidence Verification"]
+    AssessTask["ADK/Gemini task<br/>assess_trial per candidate"]
+    Verify["Verify criterion and<br/>patient evidence quotes"]
+    Judge["Compute deterministic verdict"]
+    Rank["Rank and shortlist<br/>non-excluded candidates"]
+    ChatModel["ADK/Gemini task<br/>answer_trial_question"]
+    ChatEvidence --> ChatModel
+  end
+
+  subgraph P["7. Persistence and Response"]
+    Persist["Save full match result;<br/>matchedTrialIds; status=matched"]
+    Response["HTTP MatchResponse<br/>session_id added by route"]
+    Display["React results<br/>profile, criteria, passages,<br/>missing/conflicting facts"]
+    ChatResponseBuild["Build citation objects<br/>from retrieved evidence"]
+    ChatPersist["Persist user + assistant<br/>chat messages"]
+    ChatResponse["HTTP ChatResponse"]
+    ChatDisplay["Render answer + source links"]
+    BuildResult --> Persist -->|"serialize result"| Sessions
+    Persist --> Response -->|"JSON response"| SessionUI --> Display
+    ChatUI -->|"question, trial_ids,<br/>session_id, message_id"| ChatAPI
+    ChatAPI -->|"session ownership + saved trial IDs"| Sessions
+    ChatAPI --> ChatQuery
+    ChatModel --> ChatResponseBuild
+    ChatEvidence -.->|"no usable evidence; no model call"| ChatResponseBuild
+    ChatResponseBuild --> ChatPersist --> Messages
+    ChatPersist --> ChatResponse -->|"JSON response"| ChatUI --> ChatDisplay
+  end
